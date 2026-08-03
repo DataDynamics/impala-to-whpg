@@ -1,0 +1,59 @@
+# Impala → Greenplum 적재 설정 예시
+# ${ENV_VAR} 또는 ${ENV_VAR:-기본값} 은 실행 시점에 환경변수로 치환된다.
+
+impala:
+  host: impala.example.com
+  port: 21050
+  database: default
+  # NOSASL(기본) | PLAIN(LDAP) | GSSAPI(Kerberos)
+  auth_mechanism: NOSASL
+  # auth_mechanism: PLAIN
+  # user: ${IMPALA_USER}
+  # password: ${IMPALA_PASSWORD}
+  # use_ssl: true
+  # ca_cert: /etc/ssl/certs/impala-ca.pem
+  session_settings:
+    MEM_LIMIT: 8g
+
+greenplum:
+  host: greenplum.example.com
+  port: 5432
+  database: dw
+  user: ${GP_USER:-etl}
+  password: ${GP_PASSWORD}
+  schema: staging
+  # sslmode: require
+  session_sql:
+    # 대량 적재 중 자동 통계 수집을 꺼서 처리량을 높인다
+    - SET gp_autostats_mode = 'none'
+
+jobs:
+  # 1) 전체 교체: 매번 TRUNCATE 후 다시 채운다
+  - query: |
+      SELECT
+        order_id,
+        customer_id,
+        order_dt,
+        CAST(amount AS DECIMAL(18,2)) AS amount,
+        status
+      FROM sales.orders
+      WHERE order_dt >= '2026-01-01'
+    target_table: orders
+    mode: truncate
+    batch_size: 50000
+    distributed_by: [order_id]
+
+  # 2) 증분 병합: order_id 기준으로 있으면 교체, 없으면 삽입
+  - query: SELECT * FROM sales.orders_delta
+    target_table: orders
+    mode: upsert
+    key_columns: [order_id]
+    batch_size: 100000
+
+  # 3) 원본 테이블 통째로 복제 (대상 테이블이 없으면 스키마를 보고 생성)
+  - source_table: sales.customers
+    target_table: customers
+    mode: replace
+    create_target_if_missing: true
+    distributed_by: [customer_id]
+    analyze_after_load: true
