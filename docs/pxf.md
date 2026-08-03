@@ -84,7 +84,65 @@ s3:
   pxf_server: s3srv     # → ...&SERVER=s3srv
 ```
 
-## 1. pxf-profiles.xml — 대부분 건드릴 필요가 없습니다
+## 1. 데이터베이스에 pxf 확장 설치
+
+**가장 먼저 할 일입니다.** `pxf` 는 Greenplum에 내장된 프로토콜이 아니라 확장으로
+등록해야 하는 사용자 정의 프로토콜입니다. 이 단계를 건너뛰면 외부 테이블을 만들 때
+이렇게 실패합니다.
+
+```
+ERROR:  protocol "pxf" does not exist
+```
+
+내장 `s3` 프로토콜은 별도 등록 없이 바로 쓸 수 있어서, 그쪽만 써봤다면 이 단계가
+필요하다는 걸 놓치기 쉽습니다.
+
+```sql
+-- 데이터를 적재할 데이터베이스에 접속해서 실행한다
+\c dw
+CREATE EXTENSION pxf;
+```
+
+**확장은 데이터베이스마다 따로 설치해야 합니다.** `postgres` 에 설치했다고 `dw` 에서
+쓸 수 있는 게 아닙니다. 같은 실수를 반복하기 쉬운 지점입니다.
+
+설치되었는지 확인:
+
+```sql
+SELECT extname, extversion FROM pg_extension WHERE extname = 'pxf';
+SELECT ptcname FROM pg_extprotocol;      -- pxf 가 보여야 한다
+```
+
+### CREATE EXTENSION 자체가 실패한다면
+
+```
+ERROR:  could not open extension control file ".../pxf.control": No such file or directory
+```
+
+확장 파일이 `$GPHOME` 에 아직 복사되지 않은 상태입니다. PXF 6 이상에서는
+`register` 로 설치합니다.
+
+```bash
+pxf cluster register    # $GPHOME/share/postgresql/extension/ 에 확장 파일 배포
+pxf cluster restart
+```
+
+그다음 다시 `CREATE EXTENSION pxf;` 를 실행합니다.
+
+### 일반 사용자에게 권한 주기
+
+`CREATE EXTENSION` 은 슈퍼유저로 실행해야 하고, 슈퍼유저가 아닌 계정이 외부
+테이블을 만들려면 프로토콜 권한이 따로 필요합니다.
+
+```sql
+GRANT SELECT ON PROTOCOL pxf TO etl;    -- 읽기 전용 외부 테이블
+GRANT INSERT ON PROTOCOL pxf TO etl;    -- 쓰기 가능 외부 테이블
+```
+
+권한이 없으면 `permission denied for protocol pxf` 가 납니다.
+`protocol "pxf" does not exist` 와는 다른 오류이므로 메시지로 구분하세요.
+
+## 2. pxf-profiles.xml — 대부분 건드릴 필요가 없습니다
 
 `s3:text`, `s3:parquet` 같은 기본 프로파일은 이미 정의되어 있습니다. 이 프로젝트가
 올리는 탭 구분 gzip TSV도 기본 `s3:text` 로 그대로 읽히므로, **먼저 커스텀 프로파일
@@ -156,7 +214,7 @@ pxf cluster restart   # 프로파일 변경은 재시작해야 적용된다
 `sync` 를 빠뜨리면 마스터에서만 바뀌고 세그먼트는 예전 정의를 쓰기 때문에,
 "어떤 세그먼트에서만 실패"하는 형태로 증상이 나타납니다.
 
-## 2. s3-site.xml 에 접속 정보 추가
+## 3. s3-site.xml 에 접속 정보 추가
 
 서버 디렉터리를 만들고 템플릿을 복사한 뒤 자격증명을 채웁니다. 여기서 정한
 디렉터리 이름이 곧 `LOCATION` 의 `SERVER=` 값입니다(위 [SERVER= 절](#server-에는-무엇이-들어가는가) 참고).
@@ -209,7 +267,7 @@ EC2에서 IAM 역할을 쓴다면 키를 비우고 아래처럼 인스턴스 프
 버킷마다 자격증명이 다르면 `servers/s3-prod`, `servers/s3-dev` 처럼 디렉터리를
 나누고 `SERVER=` 로 골라 쓰면 됩니다.
 
-## 3. S3 경로를 가리키는 외부 테이블
+## 4. S3 경로를 가리키는 외부 테이블
 
 여기가 실제로 "S3 경로를 추가"하는 곳입니다.
 
@@ -229,14 +287,14 @@ LOCATION을 뜯어보면 이렇습니다.
 
 ```
 pxf://dw-stage/impala-to-greenplum/orders-9f2c/?PROFILE=s3:text&SERVER=s3srv
-      └ 버킷 ┘└──────── 접두사(디렉터리) ─────┘  └ 1번 프로파일 ┘└ 2번 서버 ┘
+      └ 버킷 ┘└──────── 접두사(디렉터리) ─────┘  └ 2번 프로파일 ┘└ 3번 서버 ┘
 ```
 
 - 접두사는 디렉터리처럼 동작합니다. 그 아래 파일을 세그먼트가 나눠 읽습니다.
 - `.gz` 파일은 확장자를 보고 알아서 풀어 읽습니다.
-- 1번에서 만든 프로파일을 쓰려면 `PROFILE=s3:impala-staging` 으로 바꿉니다.
+- 2번에서 만든 프로파일을 쓰려면 `PROFILE=s3:impala-staging` 으로 바꿉니다.
 
-## 4. 이 프로젝트에서 쓰기
+## 5. 이 프로젝트에서 쓰기
 
 설정에서 `protocol: pxf` 로 바꾸면 파이프라인이 위 형태의 LOCATION을 만들어 줍니다.
 
@@ -245,7 +303,7 @@ s3:
   bucket: dw-stage
   prefix: impala-to-greenplum
   protocol: pxf
-  pxf_server: s3srv          # 2번에서 만든 서버 디렉터리 이름
+  pxf_server: s3srv          # 3번에서 만든 서버 디렉터리 이름
   file_size_mb: 128
 ```
 
@@ -260,7 +318,7 @@ pxf://dw-stage/impala-to-greenplum/orders-{난수}/?PROFILE=s3:text&SERVER=s3srv
 그대로 필요합니다. **파이썬이 올릴 때 쓰는 자격증명과 PXF가 읽을 때 쓰는
 자격증명은 별개**라, 두 곳 모두 같은 버킷에 접근할 수 있어야 합니다.
 
-## 5. 확인과 문제 해결
+## 6. 확인과 문제 해결
 
 설정이 반영됐는지 순서대로 확인합니다.
 
@@ -281,6 +339,9 @@ SELECT * FROM ext_probe LIMIT 5;
 
 | 증상 | 확인할 것 |
 | --- | --- |
+| `protocol "pxf" does not exist` | 그 데이터베이스에 `CREATE EXTENSION pxf;` 를 하지 않았습니다. [1번 절](#1-데이터베이스에-pxf-확장-설치) |
+| `permission denied for protocol pxf` | 확장은 있지만 권한이 없습니다. `GRANT SELECT ON PROTOCOL pxf TO ...` |
+| `could not open extension control file` | `pxf cluster register` 로 확장 파일을 배포하세요. |
 | 시작 시 `ProfileConf` NPE | `pxf-profiles.xml` 구조. 아래 절 참고. |
 | `ClassNotFoundException` | `pxf-profiles.xml` 의 플러그인 클래스 이름. 설치본 기본 정의와 대조하세요. |
 | `Profile ... is not defined` | 프로파일 오타이거나 `pxf cluster sync` 를 빠뜨렸습니다. |
