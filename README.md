@@ -274,3 +274,33 @@ orders.csv  182.4MB  1,240,331행
 - 엑셀에서 한글이 깨지면 `--encoding utf-8-sig`를 쓰세요.
 - 그 밖에 `--gzip`, `--delimiter`, `--null-string`, `--query-file`, `--set KEY=VALUE`를
   지원합니다. 자세한 건 `--help`를 보세요.
+
+### Thrift EOF 오류가 날 때
+
+`TSocket read 0 bytes`, `end of file` 같은 오류는 **서버가 핸드셰이크 도중 연결을
+끊었다**는 뜻입니다. 인증 실패가 아니라 포트·전송 방식·TLS·인증 방식 중 하나가
+서버 설정과 어긋난 경우가 대부분입니다. 스크립트가 현재 설정과 함께 점검 목록을
+출력하니 위에서부터 하나씩 확인하세요.
+
+| 포트 | 용도 | 접속 방법 |
+| --- | --- | --- |
+| 21050 | 바이너리 HS2 | 기본값 |
+| 28000 | HTTP HS2 | `--http-transport --port 28000` |
+| 21000 | 예전 beeswax | 여기 붙으면 EOF |
+| 25000 | 웹 UI | 여기 붙으면 EOF |
+
+```bash
+# HTTP 엔드포인트를 쓰는 환경 (CDP 등에서 흔합니다)
+python examples/query_to_csv.py --host impala.example.com --user etl_user \
+    --port 28000 --http-transport --ca-cert /etc/ssl/certs/impala-ca.pem \
+    -q "SELECT 1" -o test.csv
+
+# 서버가 평문이라면
+python examples/query_to_csv.py ... --no-ssl
+
+# 인증이 없는 서버라면
+python examples/query_to_csv.py ... --auth-mechanism NOSASL
+```
+
+`impala-shell`로 같은 조건에서 붙어보면 서버 쪽 설정인지 클라이언트 쪽인지 빨리
+구분됩니다.

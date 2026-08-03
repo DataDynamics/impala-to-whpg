@@ -187,31 +187,91 @@ PHASES = ("Impala 접속", "쿼리 실행 요청", "첫 배치 대기", "데이�
 #: impyla에서 LDAP(사용자/비밀번호) 인증을 뜻하는 값
 AUTH_MECHANISM = "PLAIN"
 
+#: 인증이 필요 없는 방식
+NO_AUTH = "NOSASL"
 
-def build_connect_kwargs(args: argparse.Namespace, password: str) -> Dict[str, Any]:
-    """TLS + LDAP 접속 인자를 만든다.
+
+def build_connect_kwargs(args: argparse.Namespace, password: Optional[str]) -> Dict[str, Any]:
+    """접속 인자를 만든다. 기본값은 TLS + LDAP.
 
     - auth_mechanism='PLAIN' 이 impyla에서 LDAP(사용자/비밀번호) 인증을 뜻한다.
       내부적으로는 SASL PLAIN으로 처리되며, 'LDAP' 을 줘도 같은 경로를 탄다.
     - use_ssl=True 로 TLS를 켜고, ca_cert로 서버 인증서를 검증한다.
-      ca_cert를 주지 않으면 암호화는 되지만 인증서 검증은 하지 않으므로,
-      운영 환경에서는 CA 인증서 경로를 지정하는 편이 안전하다.
+      ca_cert를 주면 impyla가 check_hostname=True, CERT_REQUIRED 로 설정한다.
+      주지 않으면 암호화는 되지만 인증서 검증은 하지 않는다.
+    - 바이너리(21050)가 아니라 HTTP 엔드포인트(보통 28000)를 쓰는 환경이라면
+      use_http_transport 를 켜야 한다. 안 그러면 Thrift가 EOF로 끊긴다.
     """
     kwargs: Dict[str, Any] = {
         "host": args.host,
         "port": args.port,
         "database": args.database,
-        "user": args.user,
-        "password": password,
-        "auth_mechanism": AUTH_MECHANISM,
-        "use_ssl": True,
+        "auth_mechanism": args.auth_mechanism,
+        "use_ssl": not args.no_ssl,
     }
+    if args.auth_mechanism != NO_AUTH:
+        kwargs["user"] = args.user
+        kwargs["password"] = password
+    if args.auth_mechanism == "GSSAPI":
+        kwargs["kerberos_service_name"] = args.kerberos_service_name
+
     # None을 그대로 넘기면 impyla 버전에 따라 동작이 갈리므로 값이 있을 때만 넣는다
     if args.ca_cert:
         kwargs["ca_cert"] = args.ca_cert
     if args.timeout is not None:
         kwargs["timeout"] = args.timeout
+    if args.http_transport:
+        kwargs["use_http_transport"] = True
+        kwargs["http_path"] = args.http_path
     return kwargs
+
+
+def transport_error_hint(args: argparse.Namespace) -> str:
+    """Thrift 전송 오류(EOF 등)가 났을 때 점검할 것들을 알려준다.
+
+    "TSocket read 0 bytes" 나 "end of file" 은 서버가 핸드셰이크 도중 연결을
+    끊었다는 뜻이다. 대부분 포트·전송 방식·TLS·인증 방식 중 하나가 서버 설정과
+    어긋나서 생긴다. 메시지 자체로는 어느 쪽인지 알 수 없으므로 후보를 나열한다.
+    """
+    lines = [
+        "서버가 핸드셰이크 도중 연결을 끊었습니다(EOF). 대개 아래 중 하나입니다.",
+        "",
+        f"  현재 설정: {args.host}:{args.port} "
+        f"/ {'HTTP' if args.http_transport else '바이너리'} 전송"
+        f" / TLS {'끄기' if args.no_ssl else '켜기'}"
+        f" / 인증 {args.auth_mechanism}",
+        "",
+        "  1) 전송 방식과 포트가 맞는지",
+        "     - 21050: 바이너리 HS2 (기본)",
+        "     - 28000: HTTP HS2 → --http-transport 를 켜야 합니다",
+        "     - 21000은 예전 beeswax, 25000은 웹 UI라 여기에 붙으면 EOF가 납니다",
+    ]
+    if not args.http_transport:
+        lines.append("     지금 바이너리로 붙고 있으니 --http-transport 로 한 번 바꿔보세요.")
+    else:
+        lines.append(f"     지금 HTTP path는 '{args.http_path}' 입니다. 보통 cliservice 입니다.")
+
+    lines += [
+        "",
+        "  2) TLS 설정이 서버와 맞는지",
+    ]
+    if args.no_ssl:
+        lines.append("     지금 TLS를 끄고 있습니다. 서버가 TLS를 요구하면 --no-ssl 을 빼세요.")
+    else:
+        lines.append("     지금 TLS를 켜고 있습니다. 서버가 평문이면 --no-ssl 을 주세요.")
+
+    lines += [
+        "",
+        "  3) 인증 방식이 서버와 맞는지",
+        f"     지금 {args.auth_mechanism} 입니다. "
+        "인증이 없는 서버면 --auth-mechanism NOSASL,",
+        "     Kerberos면 GSSAPI 를 쓰세요.",
+        "",
+        "  4) 앞단에 로드밸런서나 프록시가 있다면 그쪽이 끊었을 수도 있습니다.",
+        "",
+        "  impala-shell 로 같은 조건이 되는지 먼저 확인하면 범위를 빨리 좁힐 수 있습니다.",
+    ]
+    return "\n".join(lines)
 
 
 def parse_session_settings(items: Sequence[str]) -> Dict[str, str]:
@@ -330,6 +390,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     conn.add_argument("--ca-cert", help="서버 인증서 검증에 쓸 CA 인증서 경로")
     conn.add_argument("--timeout", type=int, help="접속 타임아웃(초)")
+    conn.add_argument(
+        "--auth-mechanism",
+        default=AUTH_MECHANISM,
+        choices=["PLAIN", "LDAP", "NOSASL", "GSSAPI"],
+        help="PLAIN/LDAP=LDAP 인증(기본), NOSASL=인증 없음, GSSAPI=Kerberos",
+    )
+    conn.add_argument(
+        "--kerberos-service-name",
+        default="impala",
+        help="GSSAPI일 때 쓸 서비스명 (기본 impala)",
+    )
+    conn.add_argument("--no-ssl", action="store_true", help="TLS를 끄고 평문으로 접속")
+    conn.add_argument(
+        "--http-transport",
+        action="store_true",
+        help="HS2 HTTP 엔드포인트(보통 28000)로 접속. 바이너리로 붙어 EOF가 나면 이걸 켜세요.",
+    )
+    conn.add_argument(
+        "--http-path",
+        default="cliservice",
+        help="HTTP 전송일 때의 경로 (기본 cliservice)",
+    )
 
     query = parser.add_argument_group("쿼리")
     source = query.add_mutually_exclusive_group(required=True)
@@ -376,20 +458,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     query = query.strip().rstrip(";")
 
     session_settings = parse_session_settings(args.set)
-    connect_kwargs = build_connect_kwargs(args, resolve_password(args))
+    password = resolve_password(args) if args.auth_mechanism != NO_AUTH else None
+    connect_kwargs = build_connect_kwargs(args, password)
 
     # 지연 임포트: --help는 impyla 없이도 뜬다.
     # impyla가 없거나 impala.py 파일에 가려져 있으면 원인을 짚어 알려준다.
     try:
         dbapi = import_impala_dbapi()
-        check_auth_dependencies(AUTH_MECHANISM)
+        check_auth_dependencies(args.auth_mechanism)
     except ImportError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 3
 
-    print(f"접속: {args.user}@{args.host}:{args.port} (TLS, LDAP)", file=sys.stderr)
-    with timer.measure("Impala 접속"):
-        conn = dbapi.connect(**connect_kwargs)
+    transport = "HTTP" if args.http_transport else "바이너리"
+    tls = "평문" if args.no_ssl else "TLS"
+    who = f"{args.user}@" if args.auth_mechanism != NO_AUTH else ""
+    print(
+        f"접속: {who}{args.host}:{args.port} "
+        f"({tls}, {args.auth_mechanism}, {transport} 전송)",
+        file=sys.stderr,
+    )
+
+    try:
+        with timer.measure("Impala 접속"):
+            conn = dbapi.connect(**connect_kwargs)
+    except Exception as exc:
+        # 전송 오류(EOF 등)는 메시지만으로 원인을 알기 어려워 점검 목록을 붙여준다.
+        # impyla 설치에 따라 thrift와 thriftpy2 중 어느 쪽을 쓰는지 달라지므로
+        # 모듈 경로로 잡지 않고 예외 이름으로 판별한다.
+        if type(exc).__name__ != "TTransportException":
+            raise
+        print(f"\n접속 실패: {exc}\n", file=sys.stderr)
+        print(transport_error_hint(args), file=sys.stderr)
+        return 4
 
     try:
         cursor = conn.cursor()

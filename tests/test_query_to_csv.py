@@ -188,6 +188,11 @@ def make_args(**overrides) -> argparse.Namespace:
         ca_cert="/etc/ssl/certs/impala-ca.pem",
         timeout=30,
         password_env="IMPALA_PASSWORD",
+        auth_mechanism="PLAIN",
+        kerberos_service_name="impala",
+        no_ssl=False,
+        http_transport=False,
+        http_path="cliservice",
     )
     options.update(overrides)
     return argparse.Namespace(**options)
@@ -215,6 +220,69 @@ def test_connect_kwargs_omit_unset_optionals():
     # None을 넘기면 impyla 버전에 따라 동작이 갈리므로 아예 빼야 한다
     assert "ca_cert" not in kwargs
     assert "timeout" not in kwargs
+
+
+def test_http_transport_kwargs():
+    kwargs = q.build_connect_kwargs(
+        make_args(http_transport=True, http_path="cliservice", port=28000), "secret"
+    )
+    assert kwargs["use_http_transport"] is True
+    assert kwargs["http_path"] == "cliservice"
+    assert kwargs["port"] == 28000
+
+
+def test_binary_transport_omits_http_keys():
+    kwargs = q.build_connect_kwargs(make_args(), "secret")
+    assert "use_http_transport" not in kwargs
+    assert "http_path" not in kwargs
+
+
+def test_no_ssl_turns_tls_off():
+    assert q.build_connect_kwargs(make_args(no_ssl=True), "secret")["use_ssl"] is False
+
+
+def test_nosasl_omits_credentials():
+    kwargs = q.build_connect_kwargs(make_args(auth_mechanism="NOSASL"), None)
+    assert kwargs["auth_mechanism"] == "NOSASL"
+    assert "user" not in kwargs and "password" not in kwargs
+
+
+def test_gssapi_adds_service_name():
+    kwargs = q.build_connect_kwargs(
+        make_args(auth_mechanism="GSSAPI", kerberos_service_name="impala"), "x"
+    )
+    assert kwargs["kerberos_service_name"] == "impala"
+
+
+def test_plain_omits_kerberos_service_name():
+    assert "kerberos_service_name" not in q.build_connect_kwargs(make_args(), "x")
+
+
+# -- 전송 오류 진단 ---------------------------------------------------------------
+
+
+def test_transport_hint_lists_ports_and_current_setting():
+    hint = q.transport_error_hint(make_args())
+    assert "EOF" in hint
+    assert "21050" in hint and "28000" in hint
+    assert "impala.example.com:21050" in hint
+    assert "바이너리 전송" in hint
+
+
+def test_transport_hint_suggests_http_when_binary():
+    hint = q.transport_error_hint(make_args(http_transport=False))
+    assert "--http-transport 로 한 번 바꿔보세요" in hint
+
+
+def test_transport_hint_shows_http_path_when_http():
+    hint = q.transport_error_hint(make_args(http_transport=True, http_path="cliservice"))
+    assert "cliservice" in hint
+    assert "--http-transport 로 한 번 바꿔보세요" not in hint
+
+
+def test_transport_hint_flips_tls_advice():
+    assert "--no-ssl 을 주세요" in q.transport_error_hint(make_args(no_ssl=False))
+    assert "--no-ssl 을 빼세요" in q.transport_error_hint(make_args(no_ssl=True))
 
 
 def test_connect_kwargs_match_impyla_signature():
