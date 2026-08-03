@@ -28,19 +28,31 @@ pip install -r requirements.txt
 
 ## 빠른 시작
 
-`config.example.yaml`을 복사해 접속 정보를 채운 뒤 실행합니다.
+`config.yaml`을 복사해 접속 정보를 채운 뒤 실행합니다.
 
 ```bash
-cp config.example.yaml config.yaml
+cp config.yaml config.local.yaml
 export GP_PASSWORD='...'
 
-python -m impala_to_greenplum --config config.yaml            # 전체 작업 실행
-python -m impala_to_greenplum --config config.yaml -j orders  # 특정 작업만 실행
-python -m impala_to_greenplum --config config.yaml -v         # 디버그 로그
+python -m impala_to_greenplum --config config.local.yaml            # 전체 작업 실행
+python -m impala_to_greenplum --config config.local.yaml -j orders  # 특정 작업만 실행
+python -m impala_to_greenplum --config config.local.yaml -v         # 디버그 로그
 ```
 
-비밀번호 같은 민감한 값은 YAML에 직접 쓰지 말고 `${GP_PASSWORD}` 또는
-`${GP_USER:-etl}` 형태로 환경변수를 참조하세요.
+### 설정 파일 두 개의 역할
+
+| 파일 | 용도 |
+| --- | --- |
+| `config.yaml` | 바로 돌려볼 수 있는 최소 예제. 저장소에 커밋됩니다. |
+| `config.example.yaml` | 쓸 수 있는 모든 옵션을 주석과 함께 나열한 참조 문서. |
+| `config.local.yaml` | 실제 운영 값. `.gitignore`에 걸려 있어 커밋되지 않습니다. |
+
+**운영 값은 반드시 `config.local.yaml`에 두세요.** `config.yaml`은 커밋되는 파일이라
+여기에 실제 호스트나 비밀번호를 적으면 저장소에 그대로 올라갑니다.
+
+비밀번호 같은 민감한 값은 어느 파일에서든 YAML에 직접 쓰지 말고 `${GP_PASSWORD}` 또는
+`${GP_USER:-etl}` 형태로 환경변수를 참조하세요. 정의되지 않은 환경변수를 참조하면
+실행 시점에 바로 오류가 나므로, 값이 비어 있는 채로 접속을 시도하는 일은 없습니다.
 
 ## 코드에서 직접 호출하기
 

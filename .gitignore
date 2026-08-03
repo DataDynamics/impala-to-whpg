@@ -5,7 +5,7 @@ __pycache__/
 .venv/
 venv/
 
-# 접속 정보가 담긴 실제 설정 파일 (config.example.yaml만 커밋한다)
-config.yaml
+# 실제 접속 정보가 담긴 설정 파일.
+# config.yaml / config.example.yaml 은 예제라 커밋하고, 운영 값은 *.local.yaml 에 둔다.
 *.local.yaml
 *.log
