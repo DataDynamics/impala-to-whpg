@@ -181,3 +181,6 @@ s3:
 LOCATION이 `pxf://dw-stage/{prefix}/{run}/?PROFILE=s3:text&SERVER=s3srv` 형태로
 바뀝니다. `endpoint` 나 `gp_config` 는 필요 없고, 대신 PXF 서버 쪽
 `s3-site.xml` 에 자격증명이 설정되어 있어야 합니다.
+
+프로파일 정의(`pxf-profiles.xml`), 서버 설정(`s3-site.xml`), 외부 테이블 LOCATION이
+각각 어떤 역할을 하는지는 [PXF로 S3 읽기 설정](pxf.md)에 정리해 두었습니다.

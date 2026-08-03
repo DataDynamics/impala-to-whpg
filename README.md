@@ -197,6 +197,7 @@ CSV 대신 COPY의 기본 TEXT 포맷을 쓰는 이유는 빈 문자열과 `NULL
 ## 문서
 
 - [S3 외부 테이블 적재 설정](docs/s3_external_table.md) — `s3.conf` 배포, 파일 분할, 오류 허용
+- [PXF로 S3 읽기 설정](docs/pxf.md) — `pxf-profiles.xml`, `s3-site.xml`, 외부 테이블 LOCATION
 - [분산키 선정 가이드](docs/distribution_key.md) — 후보 컬럼 진단 쿼리
 - [boto3로 S3 버킷·파일 목록 보기](docs/boto3.md) — 버킷 확인, 스테이징 파일 조회, 찌꺼기 정리
 

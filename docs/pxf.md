@@ -1,0 +1,221 @@
+# PXF로 S3 읽기 설정
+
+`s3.protocol: pxf` 를 쓰면 Greenplum 내장 `s3` 프로토콜 대신 PXF를 통해 S3를 읽습니다.
+이 문서는 그때 필요한 PXF 쪽 설정을 다룹니다.
+
+## 어떤 파일에 무엇을 적는가
+
+먼저 헷갈리기 쉬운 부분부터 정리합니다. **S3 경로(버킷·디렉터리)는
+`pxf-profiles.xml` 에 적지 않습니다.** 세 곳의 역할이 다릅니다.
+
+| 파일 / 위치 | 무엇을 적는가 |
+| --- | --- |
+| `$PXF_BASE/conf/pxf-profiles.xml` | **프로파일 정의.** 이름 하나에 플러그인 클래스와 기본 옵션을 묶습니다. |
+| `$PXF_BASE/servers/<서버>/s3-site.xml` | **접속 정보.** 액세스 키, 시크릿, 엔드포인트, 리전. |
+| 외부 테이블 `LOCATION` | **실제 S3 경로.** `pxf://버킷/디렉터리/?PROFILE=...&SERVER=...` |
+
+즉 "S3 경로를 추가한다"는 건 대부분 **외부 테이블을 만드는 일**이고,
+`pxf-profiles.xml` 은 그 경로를 어떤 방식으로 읽을지(포맷·압축 등)를 정의합니다.
+
+버킷마다 자격증명이 다르면 `servers/` 아래에 서버 디렉터리를 하나씩 만들고,
+읽는 방식이 다르면 프로파일을 하나씩 추가하는 식으로 나눠 관리합니다.
+
+## 1. pxf-profiles.xml 에 프로파일 추가
+
+`s3:text`, `s3:parquet` 같은 기본 프로파일은 이미 정의되어 있으므로 보통은 그대로
+쓰면 됩니다. **옵션 기본값을 고정하고 싶을 때만** 직접 프로파일을 추가합니다.
+예를 들어 이 프로젝트가 올리는 파일은 탭 구분 gzip TSV라, 매번
+`CREATE EXTERNAL TABLE` 에 같은 옵션을 쓰는 대신 프로파일로 굳혀둘 수 있습니다.
+
+`$PXF_BASE/conf/pxf-profiles.xml` 을 편집합니다. 이 파일은 기본 정의를 덮어쓰는
+용도이고, 여기에 없는 프로파일은 `pxf-profiles-default.xml` 의 정의가 쓰입니다.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<profiles>
+    <!--
+      기본 s3:text 를 그대로 두고, 우리 스테이징 파일 전용 프로파일을 하나 더 만든다.
+      plugins 안의 클래스 이름은 설치된 PXF 버전의 기본 정의에서 그대로 복사할 것.
+      확인 방법:
+          grep -A 12 '<name>s3:text</name>' \
+              "$PXF_HOME/conf/pxf-profiles-default.xml"
+    -->
+    <profile>
+        <name>s3:impala-staging</name>
+        <protocol>s3</protocol>
+        <plugins>
+            <fragmenter>org.greenplum.pxf.plugins.hdfs.HdfsDataFragmenter</fragmenter>
+            <accessor>org.greenplum.pxf.plugins.hdfs.LineBreakAccessor</accessor>
+            <resolver>org.greenplum.pxf.plugins.hdfs.StringPassResolver</resolver>
+        </plugins>
+        <optionMappings>
+            <!-- LOCATION 의 &옵션=값 을 내부 설정 키로 연결한다 -->
+            <mapping>
+                <option>COMPRESSION_CODEC</option>
+                <property>compression.codec</property>
+            </mapping>
+        </optionMappings>
+    </profile>
+</profiles>
+```
+
+`<plugins>` 안의 클래스 이름은 **PXF 버전마다 다를 수 있습니다.** 위 값을 그대로
+믿지 말고, 설치본의 `pxf-profiles-default.xml` 에서 `s3:text` 정의를 찾아 복사하세요.
+없는 클래스를 적으면 조회 시점에 `ClassNotFoundException` 이 납니다.
+
+편집한 뒤에는 **반드시 전 노드에 배포하고 재시작**해야 반영됩니다.
+
+```bash
+pxf cluster sync      # 마스터의 $PXF_BASE 설정을 전 세그먼트 호스트로 복사
+pxf cluster restart   # 프로파일 변경은 재시작해야 적용된다
+```
+
+`sync` 를 빠뜨리면 마스터에서만 바뀌고 세그먼트는 예전 정의를 쓰기 때문에,
+"어떤 세그먼트에서만 실패"하는 형태로 증상이 나타납니다.
+
+## 2. s3-site.xml 에 접속 정보 추가
+
+서버 디렉터리를 만들고 템플릿을 복사한 뒤 자격증명을 채웁니다. 서버 이름이 곧
+`LOCATION` 의 `SERVER=` 값이 됩니다.
+
+```bash
+mkdir -p "$PXF_BASE/servers/s3srv"
+cp "$PXF_HOME/templates/s3-site.xml" "$PXF_BASE/servers/s3srv/"
+```
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <property>
+        <name>fs.s3a.access.key</name>
+        <value>AKIA...</value>
+    </property>
+    <property>
+        <name>fs.s3a.secret.key</name>
+        <value>secret...</value>
+    </property>
+    <property>
+        <name>fs.s3a.endpoint</name>
+        <value>s3.ap-northeast-2.amazonaws.com</value>
+    </property>
+    <!-- MinIO 등 S3 호환 스토리지라면 경로 방식 접근이 필요할 수 있다
+    <property>
+        <name>fs.s3a.path.style.access</name>
+        <value>true</value>
+    </property>
+    -->
+</configuration>
+```
+
+자격증명이 평문으로 들어가므로 권한을 좁히세요.
+
+```bash
+chmod 600 "$PXF_BASE/servers/s3srv/s3-site.xml"
+pxf cluster sync
+```
+
+EC2에서 IAM 역할을 쓴다면 키를 비우고 아래처럼 인스턴스 프로파일을 쓸 수 있습니다.
+
+```xml
+<property>
+    <name>fs.s3a.aws.credentials.provider</name>
+    <value>com.amazonaws.auth.InstanceProfileCredentialsProvider</value>
+</property>
+```
+
+버킷마다 자격증명이 다르면 `servers/s3-prod`, `servers/s3-dev` 처럼 디렉터리를
+나누고 `SERVER=` 로 골라 쓰면 됩니다.
+
+## 3. S3 경로를 가리키는 외부 테이블
+
+여기가 실제로 "S3 경로를 추가"하는 곳입니다.
+
+```sql
+CREATE EXTERNAL TABLE staging.ext_orders (
+    order_id  bigint,
+    name      text,
+    amount    numeric(18,2)
+)
+LOCATION ('pxf://dw-stage/impala-to-greenplum/orders-9f2c/?PROFILE=s3:text&SERVER=s3srv')
+FORMAT 'TEXT' (DELIMITER E'\t' NULL E'\\N');
+
+INSERT INTO staging.orders SELECT * FROM staging.ext_orders;
+```
+
+LOCATION을 뜯어보면 이렇습니다.
+
+```
+pxf://dw-stage/impala-to-greenplum/orders-9f2c/?PROFILE=s3:text&SERVER=s3srv
+      └ 버킷 ┘└──────── 접두사(디렉터리) ─────┘  └ 1번 프로파일 ┘└ 2번 서버 ┘
+```
+
+- 접두사는 디렉터리처럼 동작합니다. 그 아래 파일을 세그먼트가 나눠 읽습니다.
+- `.gz` 파일은 확장자를 보고 알아서 풀어 읽습니다.
+- 1번에서 만든 프로파일을 쓰려면 `PROFILE=s3:impala-staging` 으로 바꿉니다.
+
+## 4. 이 프로젝트에서 쓰기
+
+설정에서 `protocol: pxf` 로 바꾸면 파이프라인이 위 형태의 LOCATION을 만들어 줍니다.
+
+```yaml
+s3:
+  bucket: dw-stage
+  prefix: impala-to-greenplum
+  protocol: pxf
+  pxf_server: s3srv          # 2번에서 만든 서버 디렉터리 이름
+  file_size_mb: 128
+```
+
+만들어지는 LOCATION은 이렇습니다.
+
+```
+pxf://dw-stage/impala-to-greenplum/orders-{난수}/?PROFILE=s3:text&SERVER=s3srv
+```
+
+`endpoint` 나 `gp_config` 는 PXF 모드에서 쓰이지 않습니다. 접속 정보가 전부
+`s3-site.xml` 에 있기 때문입니다. boto3 업로드용 자격증명(`access_key_id` 등)은
+그대로 필요합니다. **파이썬이 올릴 때 쓰는 자격증명과 PXF가 읽을 때 쓰는
+자격증명은 별개**라, 두 곳 모두 같은 버킷에 접근할 수 있어야 합니다.
+
+## 5. 확인과 문제 해결
+
+설정이 반영됐는지 순서대로 확인합니다.
+
+```bash
+pxf cluster status                    # 전 노드에서 떠 있는지
+pxf cluster sync                      # 설정 배포
+pxf cluster restart                   # 프로파일·서버 변경 후
+```
+
+```sql
+-- 가장 작은 단위로 먼저 확인
+CREATE EXTERNAL TABLE ext_probe (line text)
+LOCATION ('pxf://dw-stage/impala-to-greenplum/?PROFILE=s3:text&SERVER=s3srv')
+FORMAT 'TEXT' (DELIMITER E'\t');
+
+SELECT * FROM ext_probe LIMIT 5;
+```
+
+| 증상 | 확인할 것 |
+| --- | --- |
+| `ClassNotFoundException` | `pxf-profiles.xml` 의 플러그인 클래스 이름. 설치본 기본 정의와 대조하세요. |
+| `Profile ... is not defined` | 프로파일 오타이거나 `pxf cluster sync` 를 빠뜨렸습니다. |
+| `Failed to connect to ... 5888` | 해당 세그먼트 호스트의 PXF가 죽어 있습니다. `pxf cluster status` |
+| `AccessDenied` / `403` | `s3-site.xml` 의 키 또는 버킷 정책. 업로드용 자격증명과 별개입니다. |
+| 일부 세그먼트에서만 실패 | `pxf cluster sync` 누락. 마스터만 바뀐 상태입니다. |
+| 결과가 비어 있음 | LOCATION 접두사에 파일이 있는지 확인하세요(`examples/s3_ops.py ls`). |
+
+로그는 각 세그먼트 호스트의 `$PXF_LOGDIR/pxf-service.log` 에 쌓입니다. 실패한
+호스트에서 직접 열어보는 게 가장 빠릅니다.
+
+## 내장 s3 프로토콜과 비교
+
+| | PXF | 내장 `s3` 프로토콜 |
+| --- | --- | --- |
+| 설정 위치 | `s3-site.xml`(XML) | `s3.conf`(INI) |
+| 배포 | `pxf cluster sync` | `gpscp` 로 직접 복사 |
+| 별도 서비스 | 세그먼트마다 JVM 프로세스 | 없음 |
+| 포맷 | text, parquet, avro, orc 등 | text, csv |
+
+PXF가 이미 구축되어 있으면 그대로 쓰고, 아니면 설정이 간단한 내장 `s3` 프로토콜이
+낫습니다. 그쪽 절차는 [S3 외부 테이블 적재 설정](s3_external_table.md)에 있습니다.
