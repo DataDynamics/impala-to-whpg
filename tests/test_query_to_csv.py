@@ -50,10 +50,12 @@ ROWS = [
 def run_export(rows=ROWS, columns=COLUMNS, **overrides) -> str:
     options = dict(
         batch_size=2,
-        delimiter=",",
+        delimiter="`",
         null_string="",
         write_header=True,
         progress_every=0,
+        quote=False,
+        escapechar="\\",
     )
     options.update(overrides)
     buffer = io.StringIO()
@@ -72,44 +74,85 @@ def test_writes_header_and_rows():
     output = run_export()
     lines = output.splitlines()
 
-    assert lines[0] == "order_id,name,amount,order_dt"
-    assert lines[1] == "1,김철수,10.50,2026-08-01"
+    # 기본 구분자는 백틱, 값은 따옴표로 감싸지 않는다
+    assert lines[0] == "order_id`name`amount`order_dt"
+    assert lines[1] == "1`김철수`10.50`2026-08-01"
     assert len(lines) == 4
 
 
-def test_quotes_values_containing_delimiter_or_quote():
+def test_values_are_not_quoted_by_default():
     lines = run_export().splitlines()
-    # 구분자가 값 안에 있으면 따옴표로 감싸야 한다
-    assert lines[2] == '2,"쉼표, 포함",,2026-08-02'
-    # 큰따옴표는 두 번 반복해 이스케이프한다
-    assert lines[3] == '3,"따옴표"" 포함",0,2026-08-03'
+    # 쉼표나 큰따옴표가 들어 있어도 감싸지 않는다
+    assert lines[2] == "2`쉼표, 포함``2026-08-02"
+    assert lines[3] == '3`따옴표" 포함`0`2026-08-03'
+
+
+def test_quote_option_wraps_only_when_needed():
+    lines = run_export(quote=True).splitlines()
+    # QUOTE_MINIMAL은 구분자(백틱)가 없으면 감싸지 않는다. 쉼표는 구분자가 아니다.
+    assert lines[2] == "2`쉼표, 포함``2026-08-02"
+    # 큰따옴표가 들어 있으면 감싸고 두 번 반복해 이스케이프한다
+    assert lines[3] == '3`"따옴표"" 포함"`0`2026-08-03'
+
+
+def test_delimiter_in_value_is_escaped_when_not_quoted():
+    rows = [(1, "백틱`포함", Decimal("1"), date(2026, 8, 1))]
+    line = run_export(rows=rows).splitlines()[1]
+    assert line == "1`백틱\\`포함`1`2026-08-01"
+
+
+def test_delimiter_in_value_is_quoted_when_quoting_on():
+    rows = [(1, "백틱`포함", Decimal("1"), date(2026, 8, 1))]
+    line = run_export(rows=rows, quote=True).splitlines()[1]
+    assert line == '1`"백틱`포함"`1`2026-08-01'
+
+
+def test_without_escapechar_delimiter_in_value_fails_loudly():
+    import csv as _csv
+
+    rows = [(1, "백틱`포함", Decimal("1"), date(2026, 8, 1))]
+    with pytest.raises(_csv.Error, match="escape"):
+        run_export(rows=rows, escapechar="")
 
 
 def test_null_becomes_empty_by_default():
-    assert ",," in run_export().splitlines()[2]
+    assert "``" in run_export().splitlines()[2]
 
 
 def test_null_string_is_applied():
+    lines = run_export(null_string="NULL").splitlines()
+    assert lines[2] == "2`쉼표, 포함`NULL`2026-08-02"
+
+
+def test_null_string_containing_escapechar_gets_escaped():
+    """이스케이프 문자가 들어간 NULL 표기는 csv가 한 번 더 이스케이프한다."""
     lines = run_export(null_string="\\N").splitlines()
-    assert lines[2] == '2,"쉼표, 포함",\\N,2026-08-02'
+    assert lines[2] == "2`쉼표, 포함`\\\\N`2026-08-02"
+    # 그대로 내보내려면 이스케이프를 끄면 된다
+    lines = run_export(null_string="\\N", escapechar="").splitlines()
+    assert lines[2] == "2`쉼표, 포함`\\N`2026-08-02"
 
 
 def test_no_header():
     lines = run_export(write_header=False).splitlines()
     assert len(lines) == 3
-    assert lines[0].startswith("1,")
+    assert lines[0].startswith("1`")
 
 
 def test_custom_delimiter():
     lines = run_export(delimiter="\t").splitlines()
     assert lines[0] == "order_id\tname\tamount\torder_dt"
-    # 탭 구분에서는 쉼표를 감쌀 필요가 없다
     assert lines[2] == "2\t쉼표, 포함\t\t2026-08-02"
+
+
+def test_comma_delimiter_still_available():
+    lines = run_export(delimiter=",").splitlines()
+    assert lines[0] == "order_id,name,amount,order_dt"
 
 
 def test_empty_result_writes_header_only():
     output = run_export(rows=[])
-    assert output == "order_id,name,amount,order_dt\r\n"
+    assert output == "order_id`name`amount`order_dt\r\n"
 
 
 def test_batches_are_all_consumed():
@@ -127,12 +170,30 @@ def test_column_name_is_stripped_of_table_prefix():
         buffer,
         q.PhaseTimer(),
         batch_size=10,
-        delimiter=",",
+        delimiter="`",
         null_string="",
         write_header=True,
         progress_every=0,
     )
-    assert buffer.getvalue().splitlines()[0] == "order_id,name"
+    assert buffer.getvalue().splitlines()[0] == "order_id`name"
+
+
+def test_export_defaults_to_unquoted():
+    """export()를 직접 부를 때도 기본은 따옴표 끔이다."""
+    cursor = FakeCursor(["a"], [('따옴표" 있음',)])
+    buffer = io.StringIO()
+    q.export(
+        cursor,
+        "SELECT 1",
+        buffer,
+        q.PhaseTimer(),
+        batch_size=10,
+        delimiter="`",
+        null_string="",
+        write_header=False,
+        progress_every=0,
+    )
+    assert buffer.getvalue() == '따옴표" 있음\r\n'
 
 
 def test_arraysize_is_set_before_execute():
@@ -143,13 +204,24 @@ def test_arraysize_is_set_before_execute():
         io.StringIO(),
         q.PhaseTimer(),
         batch_size=1234,
-        delimiter=",",
+        delimiter="`",
         null_string="",
         write_header=True,
         progress_every=0,
     )
     assert cursor.arraysize == 1234
     assert cursor.executed == ["SELECT 1"]
+
+
+def test_make_writer_quoting_modes():
+    import csv as _csv
+
+    quoted = q.make_writer(io.StringIO(), "`", quote=True, escapechar=None)
+    assert quoted.dialect.quoting == _csv.QUOTE_MINIMAL
+
+    raw = q.make_writer(io.StringIO(), "`", quote=False, escapechar="\\")
+    assert raw.dialect.quoting == _csv.QUOTE_NONE
+    assert raw.dialect.escapechar == "\\"
 
 
 # -- 파일 열기 -------------------------------------------------------------------

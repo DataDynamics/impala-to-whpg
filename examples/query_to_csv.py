@@ -412,6 +412,28 @@ def open_output(path: str, use_gzip: bool, encoding: str) -> Iterator[TextIO]:
         handle.close()
 
 
+def make_writer(
+    handle: TextIO, delimiter: str, quote: bool, escapechar: Optional[str]
+) -> Any:
+    """CSV writer를 만든다.
+
+    따옴표를 쓰지 않으면(기본) 값 안에 구분자나 줄바꿈이 들어 있을 때 이스케이프할
+    문자가 필요하다. 없으면 csv 모듈이 그 행에서 예외를 내고 내보내기가 중단된다.
+    구분자가 값에 등장하지 않는 한 이스케이프 문자는 출력에 나타나지 않는다.
+    """
+    if quote:
+        return csv.writer(handle, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+    # quotechar=None 이어야 값 안의 큰따옴표를 건드리지 않는다.
+    # 그냥 두면 따옴표를 쓰지 않는데도 " 앞에 이스케이프 문자가 붙는다.
+    return csv.writer(
+        handle,
+        delimiter=delimiter,
+        quoting=csv.QUOTE_NONE,
+        quotechar=None,
+        escapechar=escapechar or None,
+    )
+
+
 def export(
     cursor: Any,
     query: str,
@@ -422,6 +444,8 @@ def export(
     null_string: str,
     write_header: bool,
     progress_every: int,
+    quote: bool = False,
+    escapechar: Optional[str] = "\\",
 ) -> int:
     """쿼리를 실행해 CSV로 쓰고 행 수를 돌려준다."""
     with timer.measure("쿼리 실행 요청"):
@@ -429,7 +453,7 @@ def export(
         cursor.execute(query)
 
     columns = [desc[0].split(".")[-1] for desc in (cursor.description or [])]
-    writer = csv.writer(handle, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+    writer = make_writer(handle, delimiter, quote, escapechar)
 
     if write_header and columns:
         with timer.measure("CSV 쓰기"):
@@ -537,7 +561,18 @@ def build_parser() -> argparse.ArgumentParser:
     out = parser.add_argument_group("출력")
     out.add_argument("-o", "--output", required=True, help="저장할 CSV 경로")
     out.add_argument("--gzip", action="store_true", help="gzip으로 압축해 저장")
-    out.add_argument("--delimiter", default=",", help="구분자 (기본 ,)")
+    out.add_argument("--delimiter", default="`", help="컬럼 구분자 (기본 `)")
+    out.add_argument(
+        "--quote",
+        action="store_true",
+        help='값을 큰따옴표로 감싼다. 기본은 끔(감싸지 않음).',
+    )
+    out.add_argument(
+        "--escapechar",
+        default="\\",
+        help="따옴표를 쓰지 않을 때 값 안의 구분자를 이스케이프할 문자 (기본 \\). "
+        "빈 문자열을 주면 이스케이프하지 않지만, 값에 구분자가 있으면 오류로 중단됩니다.",
+    )
     out.add_argument(
         "--encoding",
         default="utf-8",
@@ -628,6 +663,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     null_string=args.null_string,
                     write_header=not args.no_header,
                     progress_every=args.progress_every,
+                    quote=args.quote,
+                    escapechar=args.escapechar,
                 )
         except Exception as exc:
             hint = query_error_hint(query, exc)
