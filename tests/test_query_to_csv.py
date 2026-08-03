@@ -399,103 +399,82 @@ def test_connect_kwargs_match_impyla_signature():
     assert passed <= accepted, f"impyla가 모르는 인자: {passed - accepted}"
 
 
-# -- SQL 읽기와 정리 -------------------------------------------------------------
+# -- SQL 읽기 (파일 내용을 그대로 실행) -------------------------------------------
 
 
 MULTILINE = "SELECT\n    order_id,\n    amount\nFROM sales.orders\nWHERE dt = '2026-08-01'"
 
 
-def test_multiline_query_is_kept_intact():
-    assert q.normalize_query(MULTILINE) == MULTILINE
-    assert q.normalize_query(MULTILINE + ";\n") == MULTILINE
-
-
-def test_bom_is_removed():
-    # 윈도우 편집기로 저장한 .sql은 BOM이 붙는데 strip()으로는 지워지지 않는다
-    assert "﻿" not in q.normalize_query("﻿" + MULTILINE)
-    assert q.normalize_query("﻿" + MULTILINE).startswith("SELECT")
-
-
-def test_trailing_semicolon_variants():
-    for suffix in (";", ";\n", ";\n\n", ";\n-- 끝\n", ";  \n/* 끝 */\n", ";;\n"):
-        assert q.normalize_query(MULTILINE + suffix) == MULTILINE, suffix
-
-
-def test_leading_comments_are_kept():
-    # Impala는 앞에 붙은 주석을 문제없이 받는다
-    sql = "-- 일일 주문\n" + MULTILINE
-    assert q.normalize_query(sql) == sql
-    block = "/* 일일\n   주문 */\n" + MULTILINE
-    assert q.normalize_query(block) == block
-
-
-def test_semicolon_inside_string_is_not_a_separator():
-    sql = "SELECT a FROM t WHERE memo = 'a;b'"
-    assert q.normalize_query(sql) == sql
-    assert q.normalize_query(sql + ";") == sql
-
-
-def test_doubled_quote_escape_is_handled():
-    sql = "SELECT 'it''s; ok' AS x FROM t"
-    assert q.normalize_query(sql + ";\n") == sql
-
-
-def test_backtick_identifier_with_semicolon():
-    sql = "SELECT `weird;col` FROM t"
-    assert q.normalize_query(sql + ";") == sql
-
-
-def test_semicolon_inside_comment_is_not_a_separator():
-    sql = "SELECT a FROM t -- 예전엔 t2; 였음"
-    assert q.normalize_query(sql) == sql
-    block = "SELECT a /* a;b */ FROM t"
-    assert q.normalize_query(block) == block
-
-
-def test_multiple_statements_are_rejected():
-    with pytest.raises(SystemExit, match="2개"):
-        q.normalize_query("SELECT 1 FROM t;\nSELECT 2 FROM t;")
-
-
-def test_empty_or_comment_only_is_rejected():
-    with pytest.raises(SystemExit, match="실행할 SQL이 없습니다"):
-        q.normalize_query("")
-    with pytest.raises(SystemExit, match="실행할 SQL이 없습니다"):
-        q.normalize_query("-- 아직 안 씀\n")
-
-
-def test_split_statements_counts_content_only():
-    # 빈 조각(;;)은 문장으로 세지 않는다
-    assert len(q.split_statements("SELECT 1;;")) == 1
-    assert len(q.split_statements("SELECT 1; SELECT 2")) == 2
-
-
-def test_has_sql_content():
-    assert q.has_sql_content("SELECT 1")
-    assert not q.has_sql_content("   \n\t ")
-    assert not q.has_sql_content("-- 주석만\n")
-    assert not q.has_sql_content("/* 주석만 */")
-
-
-@pytest.mark.parametrize(
-    "encoding,newline",
-    [("utf-8", "\n"), ("utf-8-sig", "\n"), ("utf-8", "\r\n"), ("utf-8-sig", "\r\n")],
-)
-def test_read_query_file_handles_bom_and_crlf(tmp_path, encoding, newline):
+def read_from(tmp_path, text, encoding="utf-8", newline="\n"):
     path = tmp_path / "daily.sql"
-    path.write_bytes((MULTILINE + ";" + newline).replace("\n", newline).encode(encoding))
+    path.write_bytes(text.replace("\n", newline).encode(encoding))
+    return q.read_query(argparse.Namespace(query=None, query_file=str(path)))
 
-    args = argparse.Namespace(query=None, query_file=str(path))
-    result = q.read_query(args)
 
-    assert result == MULTILINE          # CRLF는 \n으로, BOM은 제거되어 들어온다
-    assert "\r" not in result
-    assert "﻿" not in result
+def test_file_is_executed_as_is(tmp_path):
+    # 세미콜론도 주석도 손대지 않고 그대로 넘긴다
+    text = MULTILINE + ";\n-- 끝\n"
+    assert read_from(tmp_path, text) == text
+
+
+def test_multiline_query_keeps_line_breaks(tmp_path):
+    assert read_from(tmp_path, MULTILINE) == MULTILINE
+
+
+def test_multiple_statements_are_passed_through(tmp_path):
+    text = "SELECT 1 FROM t;\nSELECT 2 FROM t;\n"
+    assert read_from(tmp_path, text) == text
+
+
+def test_bom_is_stripped_by_decoding(tmp_path):
+    """BOM 제거는 SQL 수정이 아니라 인코딩 해석이다."""
+    result = read_from(tmp_path, MULTILINE, encoding="utf-8-sig")
+    assert result == MULTILINE
+    assert not result.startswith("\ufeff")
+
+
+def test_crlf_becomes_lf(tmp_path):
+    # 텍스트 모드 유니버설 개행 처리
+    assert "\r" not in read_from(tmp_path, MULTILINE, newline="\r\n")
+
+
+def test_bom_and_crlf_together(tmp_path):
+    result = read_from(tmp_path, MULTILINE, encoding="utf-8-sig", newline="\r\n")
+    assert result == MULTILINE
 
 
 def test_read_query_from_argument():
     args = argparse.Namespace(query=MULTILINE + ";", query_file=None)
-    assert q.read_query(args) == MULTILINE
+    assert q.read_query(args) == MULTILINE + ";"
+
+
+# -- 문법 오류 힌트 ---------------------------------------------------------------
+
+
+class SyntaxError_(Exception):
+    pass
+
+
+def test_hint_only_for_syntax_errors():
+    assert q.query_error_hint("SELECT 1", RuntimeError("연결 끊김")) == ""
+    assert q.query_error_hint("SELECT 1", SyntaxError_("Syntax error in line 1")) != ""
+    assert q.query_error_hint("SELECT 1", SyntaxError_("AnalysisException: ...")) != ""
+
+
+def test_hint_mentions_trailing_semicolon():
+    hint = q.query_error_hint("SELECT 1 FROM t;\n", SyntaxError_("Syntax error"))
+    assert "끝에 세미콜론" in hint
+
+
+def test_hint_mentions_multiple_statements():
+    hint = q.query_error_hint("SELECT 1; SELECT 2", SyntaxError_("Syntax error"))
+    assert "문장이 여러 개" in hint
+
+
+def test_hint_without_semicolon_stays_short():
+    hint = q.query_error_hint("SELECT 1 FROM t", SyntaxError_("Syntax error"))
+    assert "세미콜론" not in hint
+    assert "--debug" in hint
 
 
 # -- 세션 설정 -------------------------------------------------------------------
