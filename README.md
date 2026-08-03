@@ -205,5 +205,47 @@ impala_to_greenplum/
 
 examples/
   simple_load.py        # 설정 파일 없이 코드로 적재
+  query_to_csv.py       # Impala 쿼리 → CSV 저장 (TLS + LDAP, 구간별 시간 측정)
   list_staged_files.py  # S3 스테이징 파일 목록 확인
 ```
+
+## Impala 쿼리를 CSV로 내려받기
+
+Greenplum 적재와 별개로, Impala 결과를 파일로 뽑아야 할 때가 있습니다.
+`examples/query_to_csv.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
+시간을 썼는지 보여줍니다.
+
+```bash
+export IMPALA_PASSWORD='...'
+python examples/query_to_csv.py \
+    --host impala.example.com --user etl_user \
+    --ca-cert /etc/ssl/certs/impala-ca.pem \
+    --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
+    --output orders.csv
+```
+
+```
+=== 구간별 소요 시간 ===
+  1. Impala 접속        0.412초    2.1%
+  2. 쿼리 실행 요청     1.203초    6.1%
+  3. 첫 배치 대기       8.442초   42.6%
+  4. 데이터 수신        6.120초   30.9%
+  5. CSV 쓰기           3.640초   18.4%
+     기타              0.002초    0.0%
+  ───────────────────────────────────
+     합계             19.817초  100.0%
+
+orders.csv  182.4MB  1,240,331행
+평균 62,600 rows/s
+```
+
+병목이 Impala 쪽인지(첫 배치 대기), 네트워크인지(데이터 수신), 로컬 디스크인지
+(CSV 쓰기) 한눈에 구분됩니다.
+
+- 비밀번호는 `--password` 같은 인자로 받지 않습니다. `ps`로 다른 사용자에게 노출되기
+  때문에 환경변수(`IMPALA_PASSWORD`)나 대화형 입력으로만 받습니다.
+- `--ca-cert`를 주지 않으면 통신은 암호화되지만 서버 인증서를 검증하지 않습니다.
+  운영 환경에서는 CA 인증서 경로를 지정하세요.
+- 엑셀에서 한글이 깨지면 `--encoding utf-8-sig`를 쓰세요.
+- 그 밖에 `--gzip`, `--delimiter`, `--null-string`, `--query-file`, `--set KEY=VALUE`를
+  지원합니다. 자세한 건 `--help`를 보세요.

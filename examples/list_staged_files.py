@@ -11,10 +11,14 @@
 import argparse
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List
 
-from impala_to_greenplum import load_config
-from impala_to_greenplum.s3_stage import S3Stager
+# 저장소를 설치하지 않고 바로 실행할 수 있도록 최상위 디렉터리를 경로에 넣는다
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from impala_to_greenplum import load_config  # noqa: E402
+from impala_to_greenplum.s3_stage import S3Stager  # noqa: E402
 
 
 def list_objects(client: Any, bucket: str, prefix: str) -> List[Dict[str, Any]]:
