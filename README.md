@@ -74,7 +74,7 @@ print(result.summary())
 | `key_columns` | `[]` | `upsert`의 병합 키(필수). |
 | `batch_size` | `50000` | Impala `fetchmany` 크기. |
 | `create_target_if_missing` | `true` | 대상 테이블이 없으면 Impala 스키마로 생성합니다. |
-| `distributed_by` | `[]` | 테이블 생성 시 분산키. 미지정 시 `key_columns` → 첫 컬럼 순으로 추론합니다. |
+| `distributed_by` | `[]` | 테이블 생성 시 분산키. 미지정 시 `key_columns` → 첫 컬럼 순으로 추론합니다. ([선정 가이드](docs/distribution_key.md)) |
 | `target_columns` | `[]` | SELECT 결과와 대상 컬럼명이 다를 때 순서대로 매핑합니다. |
 | `analyze_after_load` | `true` | 적재 후 `ANALYZE` 실행. |
 
@@ -116,6 +116,8 @@ CSV 대신 COPY의 기본 TEXT 포맷을 쓰는 이유는 빈 문자열과 `NULL
 - Impala 쪽 메모리가 빠듯하면 `session_settings.MEM_LIMIT`을 조정하세요.
 - 큰 테이블은 파티션 조건(`WHERE dt = ...`)으로 작업을 나눠 병렬 실행하는 것이
   단일 스트림보다 빠릅니다.
+- 분산키가 한쪽으로 쏠리면 적재와 이후 조회가 모두 느려집니다. 후보 컬럼을 진단하는
+  쿼리는 [분산키 선정 가이드](docs/distribution_key.md)에 정리해 두었습니다.
 
 ## 테스트
 
