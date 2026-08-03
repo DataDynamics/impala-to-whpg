@@ -144,7 +144,7 @@ SELECT count(*) FROM gp_segment_configuration WHERE content >= 0 AND role = 'p';
   다른 작업의 파일은 건드리지 않습니다.
 - 업로드 도중 실패한 경우에도 이미 올라간 파일은 정리 대상에 포함됩니다.
 - 디버깅할 때는 `cleanup: false` 로 두고 파일을 직접 열어보세요. 목록을 확인하는
-  방법은 [boto3로 S3 파일 목록 보기](boto3.md)에 정리해 두었습니다.
+  방법은 [boto3로 S3 버킷·파일 목록 보기](boto3.md)에 정리해 두었습니다.
 - Greenplum 쪽 적재는 한 트랜잭션이라 실패 시 롤백됩니다. S3 파일만 정리하면
   깨끗한 상태로 되돌아갑니다.
 

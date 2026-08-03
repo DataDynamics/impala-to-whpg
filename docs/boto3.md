@@ -1,8 +1,8 @@
-# boto3로 S3 파일 목록 보기
+# boto3로 S3 버킷·파일 목록 보기
 
-`load_method: s3` 로 적재할 때 만들어지는 스테이징 파일을 확인하거나, 실패한 작업이
-남긴 찌꺼기를 찾을 때 쓰는 예제입니다. `cleanup: false` 로 두고 파일을 살펴보면
-디버깅이 훨씬 수월합니다.
+`load_method: s3` 로 적재할 때 쓰는 버킷을 확인하거나, 만들어진 스테이징 파일을
+들여다보거나, 실패한 작업이 남긴 찌꺼기를 찾을 때 쓰는 예제입니다.
+`cleanup: false` 로 두고 파일을 살펴보면 디버깅이 훨씬 수월합니다.
 
 ## 준비
 
@@ -20,7 +20,120 @@ export AWS_DEFAULT_REGION=ap-northeast-2
 
 EC2/EKS에서 IAM 역할을 쓴다면 환경변수 없이도 자동으로 잡힙니다.
 
-## 1. 가장 기본 — 접두사 아래 파일 나열
+## 1. 버킷 목록 보기
+
+계정에 어떤 버킷이 있는지부터 확인합니다. 설정에 적은 버킷 이름이 맞는지, 접근
+권한이 제대로 붙었는지 점검할 때 가장 먼저 돌려보는 코드입니다.
+
+```python
+import boto3
+
+s3 = boto3.client("s3")
+
+response = s3.list_buckets()
+for bucket in response["Buckets"]:
+    print(f"{bucket['Name']}\t{bucket['CreationDate']:%Y-%m-%d}")
+
+owner = response.get("Owner", {})
+print(f"\n총 {len(response['Buckets'])}개 (소유자: {owner.get('DisplayName', owner.get('ID'))})")
+```
+
+```
+dw-stage	2025-11-02
+dw-archive	2024-06-18
+etl-logs	2024-06-18
+
+총 3개 (소유자: data-platform)
+```
+
+`list_buckets` 는 **리전과 무관하게 계정의 모든 버킷** 을 돌려줍니다. 클라이언트를
+만들 때 지정한 리전은 여기에 영향을 주지 않습니다.
+
+### 리전까지 함께 보기
+
+버킷마다 리전이 다를 수 있고, Greenplum의 `s3` 프로토콜은 엔드포인트를 리전별로
+지정해야 하므로 확인해 두면 좋습니다.
+
+```python
+import boto3
+
+s3 = boto3.client("s3")
+
+for bucket in s3.list_buckets()["Buckets"]:
+    location = s3.get_bucket_location(Bucket=bucket["Name"])["LocationConstraint"]
+    # us-east-1은 역사적 이유로 None을 돌려준다
+    region = location or "us-east-1"
+    print(f"{bucket['Name']:<20} {region}")
+```
+
+```
+dw-stage             ap-northeast-2
+dw-archive           ap-northeast-2
+etl-logs             us-east-1
+```
+
+### 버킷이 아주 많다면
+
+`list_buckets` 는 오랫동안 페이지네이션이 없었지만, 최근 botocore는 `MaxBuckets` /
+`ContinuationToken` 을 지원합니다. 버킷이 수백 개인 계정이라면 페이지네이터를
+쓰되, 구버전에서도 동작하도록 예외를 받아두면 안전합니다.
+
+```python
+import boto3
+from botocore.exceptions import OperationNotPageableError
+
+s3 = boto3.client("s3")
+
+def all_buckets() -> list:
+    try:
+        paginator = s3.get_paginator("list_buckets")
+        return [b for page in paginator.paginate() for b in page.get("Buckets", [])]
+    except OperationNotPageableError:
+        # 구버전 botocore: 한 번에 전부 돌려준다
+        return s3.list_buckets()["Buckets"]
+
+print(len(all_buckets()))
+```
+
+### 특정 버킷에 접근 가능한지 확인
+
+`list_buckets` 는 `s3:ListAllMyBuckets` 권한이 있어야 합니다. 이 권한 없이 특정
+버킷만 쓸 수 있는 계정도 흔하므로, 목록이 비었다고 버킷이 없는 건 아닙니다.
+개별 버킷 접근 여부는 `head_bucket` 으로 확인합니다.
+
+```python
+import boto3
+from botocore.exceptions import ClientError
+
+s3 = boto3.client("s3")
+
+def can_access(bucket: str) -> bool:
+    try:
+        s3.head_bucket(Bucket=bucket)
+        return True
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code == "404":
+            print(f"{bucket}: 버킷이 없습니다")
+        elif code == "403":
+            print(f"{bucket}: 권한이 없습니다")     # 존재는 하지만 접근 불가
+        else:
+            raise
+        return False
+
+can_access("dw-stage")
+```
+
+설정 파일의 버킷을 그대로 검사하려면:
+
+```python
+from impala_to_greenplum import load_config
+
+config = load_config("config.yaml")
+can_access(config.s3.bucket)
+```
+
+## 2. 가장 기본 — 접두사 아래 파일 나열
 
 `list_objects_v2` 는 한 번에 최대 1000개만 돌려줍니다. 파일이 그보다 많을 수 있으니
 **항상 페이지네이터를 쓰세요.** 직접 호출하면 1000개에서 조용히 잘립니다.
@@ -45,7 +158,7 @@ impala-to-greenplum/orders-9f2c1a7b/part-00001.tsv.gz	 12,402,117 bytes	2026-08-
 impala-to-greenplum/orders-9f2c1a7b/part-00002.tsv.gz	  8,110,004 bytes	2026-08-03 04:12:51+00:00
 ```
 
-## 2. 요약해서 보기 — 개수와 총 용량
+## 3. 요약해서 보기 — 개수와 총 용량
 
 파일이 세그먼트 수만큼 잘 나뉘었는지, 크기가 고른지 한눈에 확인합니다.
 
@@ -77,7 +190,7 @@ summarize("dw-stage", "impala-to-greenplum/")
 파일 개수가 세그먼트 수보다 적으면 병렬성을 다 못 씁니다. `s3.file_size_mb` 를
 줄이세요. 자세한 내용은 [S3 외부 테이블 적재 설정](s3_external_table.md)에 있습니다.
 
-## 3. 실행 단위로 묶어 보기 (Delimiter)
+## 4. 실행 단위로 묶어 보기 (Delimiter)
 
 이 프로젝트는 실행마다 `{prefix}/{테이블명}-{난수}/` 아래에 파일을 올립니다.
 `Delimiter="/"` 를 주면 파일 대신 그 "디렉터리" 목록만 받을 수 있습니다.
@@ -108,7 +221,7 @@ impala-to-greenplum/orders-c04af881/
 `Delimiter` 없이 부르면 하위 파일이 전부 평면적으로 나오고, 주면 한 단계만 봅니다.
 실행이 몇 번 남아 있는지 훑을 때 편합니다.
 
-## 4. 오래 남은 찌꺼기 찾기
+## 5. 오래 남은 찌꺼기 찾기
 
 `cleanup` 을 꺼둔 채 돌렸거나 프로세스가 강제 종료되면 파일이 남을 수 있습니다.
 하루 이상 지난 것만 골라냅니다.
@@ -157,7 +270,7 @@ def delete_all(bucket: str, keys: list[str]) -> None:
 # delete_all("dw-stage", [o["Key"] for o in stale])
 ```
 
-## 5. 스테이징 파일 내용 확인
+## 6. 스테이징 파일 내용 확인
 
 올라간 gzip 파일이 제대로 인코딩됐는지 앞부분만 열어봅니다. 전체를 받지 않고
 `Range` 로 앞 몇 KB만 가져오면 큰 파일도 부담이 없습니다.
@@ -187,7 +300,7 @@ peek("dw-stage", "impala-to-greenplum/orders-9f2c1a7b/part-00000.tsv.gz")
 `get_object` 의 `Body` 는 스트리밍 객체라서 `gzip.open` 에 그대로 넘길 수 있습니다.
 전체를 메모리에 올리지 않습니다.
 
-## 6. 파일 하나의 메타데이터만 확인
+## 7. 파일 하나의 메타데이터만 확인
 
 존재 여부와 크기만 알면 될 때는 `head_object` 가 가볍습니다.
 
@@ -211,7 +324,7 @@ def exists(bucket: str, key: str) -> bool:
 없는 키에 대해 `404` 를 그냥 삼키면 권한 문제(`403`)까지 "없음"으로 처리되니,
 위처럼 에러 코드를 구분해서 다뤄야 합니다.
 
-## 7. 이 프로젝트 설정을 그대로 재사용하기
+## 8. 이 프로젝트 설정을 그대로 재사용하기
 
 `config.yaml` 에 이미 버킷과 자격증명이 있으니, 목록 확인 스크립트에서도 같은 설정을
 쓰면 됩니다.
@@ -267,6 +380,9 @@ s3 = boto3.client(
 | 증상 | 원인 |
 | --- | --- |
 | 파일이 1000개에서 끊긴다 | `list_objects_v2` 직접 호출. 페이지네이터를 쓰세요. |
+| `list_buckets` 가 `AccessDenied` | `s3:ListAllMyBuckets` 권한이 없습니다. 버킷을 이미 안다면 `head_bucket` 으로 접근만 확인하세요. |
+| 버킷 목록이 비어 보인다 | 권한 범위가 특정 버킷으로 한정된 계정입니다. 버킷이 없다는 뜻이 아닙니다. |
+| `get_bucket_location` 이 `None` | `us-east-1` 은 역사적 이유로 `LocationConstraint` 가 `None` 입니다. |
 | `KeyError: 'Contents'` | 결과가 비면 `Contents` 키가 아예 없습니다. `page.get("Contents", [])` 로 받으세요. |
 | `TypeError: can't compare offset-naive and offset-aware datetimes` | `LastModified` 는 tz-aware입니다. 비교 대상에 `timezone.utc` 를 붙이세요. |
 | 하위 디렉터리가 안 보인다 | S3에 디렉터리는 없습니다. `Delimiter="/"` 로 `CommonPrefixes` 를 받으세요. |
