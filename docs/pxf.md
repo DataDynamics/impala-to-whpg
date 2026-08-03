@@ -20,6 +20,70 @@
 버킷마다 자격증명이 다르면 `servers/` 아래에 서버 디렉터리를 하나씩 만들고,
 읽는 방식이 다르면 프로파일을 하나씩 추가하는 식으로 나눠 관리합니다.
 
+## SERVER= 에는 무엇이 들어가는가
+
+`$PXF_BASE/servers/` 아래에 만든 **디렉터리 이름**이 그대로 들어갑니다.
+직접 정하는 임의의 이름입니다.
+
+```
+$PXF_BASE/servers/s3srv/s3-site.xml        ← 이 디렉터리를 만들면
+                  ^^^^^
+LOCATION ('pxf://dw-stage/data/?PROFILE=s3:text&SERVER=s3srv')
+                                                        ^^^^^  ← 이 이름을 쓴다
+```
+
+이름 자체에는 아무 의미가 없습니다. `s3srv`, `prod-s3`, `dw` 무엇이든 되고,
+PXF는 그 이름의 디렉터리에서 `s3-site.xml` 을 찾을 뿐입니다.
+
+**호스트명·버킷명·엔드포인트가 아닙니다.** 이 셋과 헷갈리기 쉬운데, 그런 값은
+전부 다른 곳에 적습니다.
+
+| 넣고 싶은 것 | 실제로 적는 곳 |
+| --- | --- |
+| S3 호스트/엔드포인트 | `s3-site.xml` 의 `fs.s3a.endpoint` |
+| 버킷 이름 | LOCATION의 `pxf://` 바로 뒤 |
+| 자격증명 | `s3-site.xml` 의 `fs.s3a.access.key` / `secret.key` |
+| 서버 설정 디렉터리 이름 | `SERVER=` ← 여기 |
+
+### 생략하면
+
+`SERVER=` 를 빼면 `default` 서버를 씁니다. 즉 `$PXF_BASE/servers/default/` 의
+설정을 읽습니다.
+
+```sql
+-- 아래 둘은 같은 뜻이다
+LOCATION ('pxf://dw-stage/data/?PROFILE=s3:text')
+LOCATION ('pxf://dw-stage/data/?PROFILE=s3:text&SERVER=default')
+```
+
+S3만 쓰는 환경이면 `default` 에 `s3-site.xml` 을 두고 `SERVER=` 를 생략해도 됩니다.
+다만 HDFS 등 다른 소스와 섞어 쓴다면 이름을 나눠두는 편이 헷갈리지 않습니다.
+
+### 확인하는 법
+
+지금 쓸 수 있는 서버 이름은 디렉터리 목록이 곧 답입니다.
+
+```bash
+ls "$PXF_BASE/servers/"
+# default  s3srv  hdfs-prod
+```
+
+이름을 지을 때 주의할 점:
+
+- **소문자로 두세요.** PXF는 서버 이름을 소문자로 처리하므로 디렉터리를 `S3Srv` 로
+  만들면 찾지 못할 수 있습니다.
+- 디렉터리는 **모든 PXF 호스트에** 있어야 합니다. 마스터에서 만든 뒤 반드시
+  `pxf cluster sync` 를 실행하세요. 빠뜨리면 일부 세그먼트에서만
+  `server configuration not found` 류의 오류가 납니다.
+
+이 프로젝트에서는 설정의 `s3.pxf_server` 값이 그대로 `SERVER=` 로 들어갑니다.
+
+```yaml
+s3:
+  protocol: pxf
+  pxf_server: s3srv     # → ...&SERVER=s3srv
+```
+
 ## 1. pxf-profiles.xml 에 프로파일 추가
 
 `s3:text`, `s3:parquet` 같은 기본 프로파일은 이미 정의되어 있으므로 보통은 그대로
@@ -75,8 +139,8 @@ pxf cluster restart   # 프로파일 변경은 재시작해야 적용된다
 
 ## 2. s3-site.xml 에 접속 정보 추가
 
-서버 디렉터리를 만들고 템플릿을 복사한 뒤 자격증명을 채웁니다. 서버 이름이 곧
-`LOCATION` 의 `SERVER=` 값이 됩니다.
+서버 디렉터리를 만들고 템플릿을 복사한 뒤 자격증명을 채웁니다. 여기서 정한
+디렉터리 이름이 곧 `LOCATION` 의 `SERVER=` 값입니다(위 [SERVER= 절](#server-에는-무엇이-들어가는가) 참고).
 
 ```bash
 mkdir -p "$PXF_BASE/servers/s3srv"
