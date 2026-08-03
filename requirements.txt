@@ -1,8 +1,14 @@
 impyla>=0.18.0
 psycopg2-binary>=2.9.5
 PyYAML>=6.0
+
+# LDAP(PLAIN)과 Kerberos(GSSAPI) 인증에 필요하다. impyla는 auth_mechanism이
+# NOSASL이 아니면 접속 시점에 이 둘을 임포트한다. 인증 없는 환경이라면 빼도 된다.
+#
+# 데비안/우분투에서 "Failed building wheel for pure-sasl" 이 나면 PEP 517로 빌드한다:
+#     pip install --use-pep517 pure-sasl thrift-sasl
+pure-sasl>=0.6.2
+thrift-sasl>=0.4.3
+
 # S3 스테이징(load_method: s3)에 필요. COPY 방식만 쓴다면 없어도 된다.
 boto3>=1.26.0
-# Kerberos 인증을 사용하는 Impala/Hive 환경에서만 필요
-# pure-sasl>=0.6.2
-# thrift-sasl>=0.4.3

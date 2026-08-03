@@ -34,6 +34,10 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, TextIO
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from impala_to_greenplum.config import ImpalaConfig  # noqa: E402
+from impala_to_greenplum.source import (  # noqa: E402
+    check_auth_dependencies,
+    import_impala_dbapi,
+)
 
 
 def display_width(text: str) -> int:
@@ -285,11 +289,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         key, _, value = item.partition("=")
         config.session_settings[key.strip()] = value.strip()
 
-    from impala.dbapi import connect  # 지연 임포트: --help는 impyla 없이도 뜬다
+    # 지연 임포트: --help는 impyla 없이도 뜬다.
+    # impyla가 없거나 impala.py 파일에 가려져 있으면 원인을 짚어 알려준다.
+    try:
+        dbapi = import_impala_dbapi()
+        check_auth_dependencies(config.auth_mechanism)
+    except ImportError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 3
 
     print(f"접속: {args.user}@{args.host}:{args.port} (TLS, LDAP)", file=sys.stderr)
     with timer.measure("Impala 접속"):
-        conn = connect(**config.connect_kwargs())
+        conn = dbapi.connect(**config.connect_kwargs())
 
     try:
         cursor = conn.cursor()

@@ -22,9 +22,22 @@ S3     : Impala → 파이썬 → S3 → 세그먼트 N대가 병렬로 직접 �
 pip install -r requirements.txt
 ```
 
-- Kerberos 환경이라면 `requirements.txt`의 `pure-sasl`, `thrift-sasl` 주석을 해제하세요.
+- `pure-sasl`, `thrift-sasl`은 **LDAP(PLAIN)과 Kerberos(GSSAPI) 인증 모두에 필요합니다.**
+  impyla는 `auth_mechanism`이 `NOSASL`이 아니면 접속하는 순간 이 둘을 불러옵니다.
 - S3 방식을 쓰려면 Greenplum 세그먼트에 `s3` 프로토콜 설정 파일을 배포해야 합니다.
   준비 절차는 [S3 외부 테이블 적재 설정](docs/s3_external_table.md)에 정리해 두었습니다.
+
+### 설치 중 자주 막히는 것
+
+| 증상 | 해결 |
+| --- | --- |
+| `Failed building wheel for pure-sasl` | 데비안/우분투 setuptools 문제입니다. `pip install --use-pep517 pure-sasl thrift-sasl` |
+| `ModuleNotFoundError: No module named 'impala'` | impyla 미설치. `pip install impyla` |
+| `ModuleNotFoundError: ...; 'impala' is not a package` | 작업 디렉터리에 `impala.py` 파일이 있어 impyla를 가리고 있습니다. 파일 이름을 바꾸세요. |
+| 접속 시 `No module named 'thrift_sasl'` | LDAP/Kerberos에 필요한 SASL 패키지가 없습니다. 위 첫 줄대로 설치하세요. |
+
+앞의 세 가지는 실행 시 원인과 해결 방법을 함께 출력하므로, 메시지를 그대로 따라가면
+됩니다.
 
 ## 빠른 시작
 
