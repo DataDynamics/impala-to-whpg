@@ -6,7 +6,7 @@
 import logging
 import os
 
-from impala_to_greenplum import GreenplumConfig, ImpalaConfig
+from impala_to_greenplum import GreenplumConfig, ImpalaConfig, S3Config
 from impala_to_greenplum.pipeline import load_query
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -26,6 +26,17 @@ greenplum = GreenplumConfig(
     schema="staging",
 )
 
+# S3를 거쳐 세그먼트가 병렬로 읽어들인다. s3 인자를 빼면 COPY 방식으로 동작한다.
+# 세그먼트에 s3.conf를 미리 배포해야 한다. docs/s3_external_table.md 참고.
+s3 = S3Config(
+    bucket=os.environ.get("S3_BUCKET", "dw-stage"),
+    prefix="impala-to-greenplum",
+    endpoint=os.environ.get("S3_ENDPOINT", "s3.ap-northeast-2.amazonaws.com"),
+    region=os.environ.get("AWS_DEFAULT_REGION", "ap-northeast-2"),
+    gp_config="/home/gpadmin/s3.conf",
+    file_size_mb=128,
+)
+
 result = load_query(
     impala,
     greenplum,
@@ -35,6 +46,7 @@ result = load_query(
          WHERE order_dt = '2026-08-01'
     """,
     target_table="orders",
+    s3=s3,
     mode="upsert",
     key_columns=["order_id"],
     batch_size=50_000,
