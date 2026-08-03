@@ -235,8 +235,13 @@ Greenplum 적재와 별개로, Impala 결과를 파일로 뽑아야 할 때가 �
 `examples/query_to_csv.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
 시간을 썼는지 보여줍니다.
 
+**이 스크립트는 단독으로 동작합니다.** 표준 라이브러리와 impyla 외에 아무것도
+필요하지 않으므로, 이 파일 하나만 복사해서 다른 곳에서 써도 됩니다.
+
 ```bash
+pip install impyla pure-sasl thrift-sasl
 export IMPALA_PASSWORD='...'
+
 python examples/query_to_csv.py \
     --host impala.example.com --user etl_user \
     --ca-cert /etc/ssl/certs/impala-ca.pem \

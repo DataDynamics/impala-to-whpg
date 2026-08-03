@@ -193,12 +193,14 @@ def make_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**options)
 
 
-def test_config_uses_tls_and_ldap():
-    config = q.build_config(make_args(), "secret")
-    kwargs = config.connect_kwargs()
+def test_connect_kwargs_use_tls_and_ldap():
+    kwargs = q.build_connect_kwargs(make_args(), "secret")
 
     assert kwargs["auth_mechanism"] == "PLAIN"   # impyla에서 LDAP을 뜻한다
     assert kwargs["use_ssl"] is True
+    assert kwargs["host"] == "impala.example.com"
+    assert kwargs["port"] == 21050
+    assert kwargs["database"] == "sales"
     assert kwargs["user"] == "etl_user"
     assert kwargs["password"] == "secret"
     assert kwargs["ca_cert"] == "/etc/ssl/certs/impala-ca.pem"
@@ -207,10 +209,112 @@ def test_config_uses_tls_and_ldap():
     assert "kerberos_service_name" not in kwargs
 
 
-def test_config_without_ca_cert_omits_it():
-    kwargs = q.build_config(make_args(ca_cert=None), "secret").connect_kwargs()
+def test_connect_kwargs_omit_unset_optionals():
+    kwargs = q.build_connect_kwargs(make_args(ca_cert=None, timeout=None), "secret")
     assert kwargs["use_ssl"] is True
+    # None을 넘기면 impyla 버전에 따라 동작이 갈리므로 아예 빼야 한다
     assert "ca_cert" not in kwargs
+    assert "timeout" not in kwargs
+
+
+def test_connect_kwargs_match_impyla_signature():
+    """impyla가 실제로 받는 인자만 넘기는지 확인한다(설치돼 있을 때만)."""
+    dbapi = pytest.importorskip("impala.dbapi")
+    import inspect
+
+    accepted = set(inspect.signature(dbapi.connect).parameters)
+    passed = set(q.build_connect_kwargs(make_args(), "secret"))
+    assert passed <= accepted, f"impyla가 모르는 인자: {passed - accepted}"
+
+
+# -- 세션 설정 -------------------------------------------------------------------
+
+
+def test_parse_session_settings():
+    assert q.parse_session_settings(["MEM_LIMIT=8g", "REQUEST_POOL=etl"]) == {
+        "MEM_LIMIT": "8g",
+        "REQUEST_POOL": "etl",
+    }
+
+
+def test_parse_session_settings_strips_spaces():
+    assert q.parse_session_settings([" MEM_LIMIT = 8g "]) == {"MEM_LIMIT": "8g"}
+
+
+def test_parse_session_settings_empty():
+    assert q.parse_session_settings([]) == {}
+
+
+@pytest.mark.parametrize("bad", ["MEM_LIMIT", "=8g", ""])
+def test_parse_session_settings_rejects_malformed(bad):
+    with pytest.raises(SystemExit, match="KEY=VALUE"):
+        q.parse_session_settings([bad])
+
+
+# -- 단독 실행 (프로젝트 패키지 비의존) --------------------------------------------
+
+
+def test_script_has_no_project_dependency():
+    """이 스크립트는 표준 라이브러리와 impyla만으로 돌아야 한다."""
+    import ast
+
+    source = Path(q.__file__).read_text(encoding="utf-8")
+    modules = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module.split(".")[0])
+
+    assert "impala_to_greenplum" not in modules
+    allowed = {
+        "argparse", "contextlib", "csv", "getpass", "gzip", "importlib",
+        "os", "sys", "time", "typing", "unicodedata",
+        "impala",  # 유일한 외부 의존성
+    }
+    assert modules <= allowed, f"허용되지 않은 의존성: {modules - allowed}"
+
+
+# -- impyla 임포트 진단 (스크립트 자체 구현) ---------------------------------------
+
+
+def spec_for(origin, is_package):
+    import types
+
+    return types.SimpleNamespace(
+        origin=origin,
+        submodule_search_locations=["/some/dir"] if is_package else None,
+    )
+
+
+def test_missing_impyla_hint(monkeypatch):
+    monkeypatch.setattr(q.importlib.util, "find_spec", lambda name: None)
+    hint = q._import_hint(ImportError("No module named 'impala'"))
+    assert "pip install impyla" in hint
+
+
+def test_shadowing_file_hint(monkeypatch):
+    monkeypatch.setattr(
+        q.importlib.util, "find_spec", lambda name: spec_for("/work/impala.py", False)
+    )
+    hint = q._import_hint(ImportError("'impala' is not a package"))
+    assert "/work/impala.py" in hint and "가리고 있습니다" in hint
+
+
+def test_shadowing_directory_hint(monkeypatch):
+    monkeypatch.setattr(q.importlib.util, "find_spec", lambda name: spec_for(None, True))
+    hint = q._import_hint(ImportError("No module named 'impala.dbapi'"))
+    assert "디렉터리가 impyla 패키지를 가리고 있습니다" in hint
+
+
+def test_sasl_dependency_check(monkeypatch):
+    monkeypatch.setattr(q.importlib.util, "find_spec", lambda name: None)
+    q.check_auth_dependencies("NOSASL")  # SASL 불필요
+
+    with pytest.raises(ImportError) as exc:
+        q.check_auth_dependencies("PLAIN")
+    assert "pip install pure-sasl thrift-sasl" in str(exc.value)
+    assert "--use-pep517" in str(exc.value)
 
 
 def test_password_from_environment(monkeypatch):

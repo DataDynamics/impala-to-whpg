@@ -2,8 +2,15 @@
 
 TLS(SSL) 위에서 LDAP 인증(auth_mechanism=PLAIN)으로 접속하는 구성을 전제로 한다.
 
+이 스크립트는 **단독으로 동작한다.** 표준 라이브러리와 impyla 외에는 아무것도
+필요하지 않으므로, 이 파일 하나만 다른 곳으로 복사해서 써도 된다.
+
+    pip install impyla pure-sasl thrift-sasl
+    # "Failed building wheel for pure-sasl" 이 나면
+    #     pip install --use-pep517 pure-sasl thrift-sasl
+
     export IMPALA_PASSWORD='...'
-    python examples/query_to_csv.py \
+    python query_to_csv.py \
         --host impala.example.com \
         --user etl_user \
         --ca-cert /etc/ssl/certs/impala-ca.pem \
@@ -11,7 +18,7 @@ TLS(SSL) 위에서 LDAP 인증(auth_mechanism=PLAIN)으로 접속하는 구성�
         --output orders.csv
 
     # 쿼리를 파일에서 읽고 gzip으로 압축해 저장
-    python examples/query_to_csv.py --host impala.example.com --user etl_user \
+    python query_to_csv.py --host impala.example.com --user etl_user \
         --query-file daily_orders.sql --output orders.csv.gz --gzip
 
 비밀번호는 명령행 인자로 받지 않는다. ps로 다른 사용자에게 노출되기 때문에
@@ -23,21 +30,85 @@ import contextlib
 import csv
 import getpass
 import gzip
+import importlib.util
 import os
 import sys
 import time
 import unicodedata
-from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, TextIO
 
-# 저장소를 설치하지 않고 바로 실행할 수 있도록 최상위 디렉터리를 경로에 넣는다
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from impala_to_greenplum.config import ImpalaConfig  # noqa: E402
-from impala_to_greenplum.source import (  # noqa: E402
-    check_auth_dependencies,
-    import_impala_dbapi,
+_INSTALL_HINT = (
+    "impyla가 설치되어 있지 않습니다.\n"
+    "    pip install impyla\n"
+    "  LDAP/Kerberos 인증에는 pure-sasl, thrift-sasl도 필요합니다."
 )
+
+
+def _import_hint(exc: ImportError) -> str:
+    """impyla 임포트 실패 원인을 짚어 준다.
+
+    'impala' 라는 이름의 파일이나 디렉터리가 있으면 진짜 패키지를 가려버리는데,
+    이때 나오는 "'impala' is not a package" 메시지만 봐서는 원인을 알기 어렵다.
+    """
+    try:
+        spec = importlib.util.find_spec("impala")
+    except (ImportError, ValueError):
+        spec = None
+
+    if spec is None:
+        return _INSTALL_HINT
+    if spec.submodule_search_locations is None:
+        # 패키지가 아니라 단일 모듈로 잡혔다 = 같은 이름의 .py 파일이 가리고 있다
+        return (
+            f"'{spec.origin}' 파일이 impyla 패키지를 가리고 있습니다.\n"
+            "  이 파일의 이름을 바꾸거나 다른 디렉터리로 옮긴 뒤 다시 실행하세요.\n"
+            "  (파이썬은 현재 디렉터리를 먼저 뒤지므로, impala.py 라는 파일이 있으면\n"
+            "   설치된 impyla 대신 그 파일을 가져옵니다.)"
+        )
+    if spec.origin is None:
+        # __init__.py 없는 impala/ 디렉터리가 네임스페이스 패키지로 잡힌 경우
+        return (
+            f"{list(spec.submodule_search_locations)} 디렉터리가 impyla 패키지를 "
+            "가리고 있습니다.\n  디렉터리 이름을 바꾸거나 다른 곳으로 옮긴 뒤 다시 "
+            "실행하세요.\n  impyla가 아직 없다면 함께 설치하세요: pip install impyla"
+        )
+    return f"impyla를 불러오지 못했습니다: {exc}\n  {_INSTALL_HINT}"
+
+
+def import_impala_dbapi() -> Any:
+    """impyla의 ``dbapi`` 모듈을 가져온다. 실패하면 원인을 설명하는 오류를 낸다."""
+    try:
+        from impala import dbapi  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(_import_hint(exc)) from exc
+    return dbapi
+
+
+def check_auth_dependencies(auth_mechanism: str) -> None:
+    """인증 방식에 필요한 SASL 패키지가 있는지 미리 확인한다.
+
+    impyla는 ``auth_mechanism`` 이 NOSASL이 아니면 접속하는 순간에야
+    ``thrift_sasl`` / ``puresasl`` 을 임포트한다. 그래서 패키지가 없으면 접속 직전에
+    맥락 없는 ModuleNotFoundError가 튀어나온다. 여기서 미리 확인해 알려준다.
+    """
+    if (auth_mechanism or "NOSASL").upper() == "NOSASL":
+        return
+
+    missing = [
+        name
+        for name in ("thrift_sasl", "puresasl")
+        if importlib.util.find_spec(name) is None
+    ]
+    if not missing:
+        return
+
+    raise ImportError(
+        f"auth_mechanism={auth_mechanism} 인증에는 SASL 패키지가 필요한데 "
+        f"{', '.join(missing)} 이(가) 없습니다.\n"
+        "    pip install pure-sasl thrift-sasl\n"
+        "  데비안/우분투에서 'Failed building wheel for pure-sasl' 이 나면:\n"
+        "    pip install --use-pep517 pure-sasl thrift-sasl"
+    )
 
 
 def display_width(text: str) -> int:
@@ -113,25 +184,45 @@ class PhaseTimer:
 PHASES = ("Impala 접속", "쿼리 실행 요청", "첫 배치 대기", "데이터 수신", "CSV 쓰기")
 
 
-def build_config(args: argparse.Namespace, password: str) -> ImpalaConfig:
-    """TLS + LDAP 접속 설정을 만든다.
+#: impyla에서 LDAP(사용자/비밀번호) 인증을 뜻하는 값
+AUTH_MECHANISM = "PLAIN"
+
+
+def build_connect_kwargs(args: argparse.Namespace, password: str) -> Dict[str, Any]:
+    """TLS + LDAP 접속 인자를 만든다.
 
     - auth_mechanism='PLAIN' 이 impyla에서 LDAP(사용자/비밀번호) 인증을 뜻한다.
+      내부적으로는 SASL PLAIN으로 처리되며, 'LDAP' 을 줘도 같은 경로를 탄다.
     - use_ssl=True 로 TLS를 켜고, ca_cert로 서버 인증서를 검증한다.
       ca_cert를 주지 않으면 암호화는 되지만 인증서 검증은 하지 않으므로,
       운영 환경에서는 CA 인증서 경로를 지정하는 편이 안전하다.
     """
-    return ImpalaConfig(
-        host=args.host,
-        port=args.port,
-        database=args.database,
-        user=args.user,
-        password=password,
-        auth_mechanism="PLAIN",
-        use_ssl=True,
-        ca_cert=args.ca_cert,
-        timeout=args.timeout,
-    )
+    kwargs: Dict[str, Any] = {
+        "host": args.host,
+        "port": args.port,
+        "database": args.database,
+        "user": args.user,
+        "password": password,
+        "auth_mechanism": AUTH_MECHANISM,
+        "use_ssl": True,
+    }
+    # None을 그대로 넘기면 impyla 버전에 따라 동작이 갈리므로 값이 있을 때만 넣는다
+    if args.ca_cert:
+        kwargs["ca_cert"] = args.ca_cert
+    if args.timeout is not None:
+        kwargs["timeout"] = args.timeout
+    return kwargs
+
+
+def parse_session_settings(items: Sequence[str]) -> Dict[str, str]:
+    """``KEY=VALUE`` 목록을 세션 설정 딕셔너리로 바꾼다."""
+    settings: Dict[str, str] = {}
+    for item in items:
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip():
+            raise SystemExit(f"--set 은 KEY=VALUE 형식이어야 합니다: {item!r}")
+        settings[key.strip()] = value.strip()
+    return settings
 
 
 def resolve_password(args: argparse.Namespace) -> str:
@@ -284,28 +375,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             query = fp.read()
     query = query.strip().rstrip(";")
 
-    config = build_config(args, resolve_password(args))
-    for item in args.set:
-        key, _, value = item.partition("=")
-        config.session_settings[key.strip()] = value.strip()
+    session_settings = parse_session_settings(args.set)
+    connect_kwargs = build_connect_kwargs(args, resolve_password(args))
 
     # 지연 임포트: --help는 impyla 없이도 뜬다.
     # impyla가 없거나 impala.py 파일에 가려져 있으면 원인을 짚어 알려준다.
     try:
         dbapi = import_impala_dbapi()
-        check_auth_dependencies(config.auth_mechanism)
+        check_auth_dependencies(AUTH_MECHANISM)
     except ImportError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 3
 
     print(f"접속: {args.user}@{args.host}:{args.port} (TLS, LDAP)", file=sys.stderr)
     with timer.measure("Impala 접속"):
-        conn = dbapi.connect(**config.connect_kwargs())
+        conn = dbapi.connect(**connect_kwargs)
 
     try:
         cursor = conn.cursor()
         try:
-            for key, value in config.session_settings.items():
+            for key, value in session_settings.items():
                 cursor.execute(f"SET {key}={value}")
 
             with open_output(args.output, args.gzip, args.encoding) as handle:
