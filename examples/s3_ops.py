@@ -1,0 +1,333 @@
+"""S3 파일·디렉터리 조작 예제 (업로드, 삭제, 디렉터리 생성/삭제, 목록).
+
+    python examples/s3_ops.py ls     s3://dw-stage/impala/
+    python examples/s3_ops.py upload orders.csv s3://dw-stage/impala/orders.csv
+    python examples/s3_ops.py upload ./out/ s3://dw-stage/impala/out/ --recursive
+    python examples/s3_ops.py mkdir  s3://dw-stage/impala/2026-08-03/
+    python examples/s3_ops.py rm     s3://dw-stage/impala/orders.csv --yes
+    python examples/s3_ops.py rmdir  s3://dw-stage/impala/2026-08-03/ --yes
+
+S3에는 디렉터리가 없다. 키가 ``a/b/c.csv`` 인 오브젝트가 있을 뿐이고, 콘솔이
+슬래시를 보고 폴더처럼 보여줄 뿐이다. 그래서 이 스크립트에서는
+
+- ``mkdir`` 은 ``a/b/`` 라는 빈 오브젝트를 하나 만든다(폴더 표시용 관례).
+  파일을 올릴 때 상위 "디렉터리"를 미리 만들 필요는 없다.
+- ``rmdir`` 은 그 접두사로 시작하는 오브젝트를 **전부** 지운다.
+
+삭제는 되돌릴 수 없으므로 ``--yes`` 없이는 지울 목록을 보여주고 물어본다.
+
+자격증명은 환경변수나 IAM 역할을 따른다. ``--config config.yaml`` 을 주면
+프로젝트 설정의 s3 섹션(버킷, 자격증명, 엔드포인트)을 그대로 재사용한다.
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+#: delete_objects 는 요청당 1000개까지만 받는다
+DELETE_BATCH = 1000
+
+
+def parse_s3_uri(uri: str) -> Tuple[str, str]:
+    """``s3://bucket/key`` 를 (버킷, 키)로 나눈다."""
+    if not uri.startswith("s3://"):
+        raise SystemExit(f"S3 경로는 s3://버킷/키 형식이어야 합니다: {uri!r}")
+    rest = uri[len("s3://") :]
+    bucket, _, key = rest.partition("/")
+    if not bucket:
+        raise SystemExit(f"버킷 이름이 없습니다: {uri!r}")
+    return bucket, key
+
+
+def as_directory(key: str) -> str:
+    """디렉터리로 쓸 접두사는 슬래시로 끝나게 맞춘다."""
+    return key if key.endswith("/") else key + "/"
+
+
+def human(size: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(size) < 1024 or unit == "GB":
+            return f"{size:,.1f}{unit}"
+        size /= 1024
+    return f"{size:,.1f}GB"
+
+
+def make_client(args: argparse.Namespace) -> Any:
+    """boto3 S3 클라이언트를 만든다.
+
+    ``--config`` 를 주면 프로젝트 설정의 s3 섹션을 재사용하고, 없으면 환경변수나
+    IAM 역할 등 boto3 기본 자격증명 체인을 따른다.
+    """
+    if args.config:
+        # 저장소를 설치하지 않고도 돌도록 최상위를 경로에 넣는다
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from impala_to_greenplum import load_config
+        from impala_to_greenplum.s3_stage import S3Stager
+
+        config = load_config(args.config)
+        if config.s3 is None:
+            raise SystemExit(f"{args.config} 에 s3 섹션이 없습니다.")
+        return S3Stager(config.s3).client
+
+    import boto3
+
+    session = boto3.session.Session(region_name=args.region)
+    return session.client("s3", endpoint_url=args.endpoint_url or None)
+
+
+def list_objects(client: Any, bucket: str, prefix: str) -> List[Dict[str, Any]]:
+    """접두사 아래 모든 오브젝트를 돌려준다.
+
+    list_objects_v2 는 한 번에 1000개까지만 주므로 페이지네이터로 끝까지 훑는다.
+    """
+    paginator = client.get_paginator("list_objects_v2")
+    return [
+        obj
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix)
+        for obj in page.get("Contents", [])  # 결과가 비면 Contents 키가 없다
+    ]
+
+
+def delete_keys(client: Any, bucket: str, keys: Sequence[str]) -> int:
+    """키 목록을 1000개씩 묶어 지우고 실제로 지운 개수를 돌려준다."""
+    deleted = 0
+    for start in range(0, len(keys), DELETE_BATCH):
+        batch = keys[start : start + DELETE_BATCH]
+        response = client.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True},
+        )
+        errors = (response or {}).get("Errors") or []
+        for error in errors:
+            print(
+                f"  삭제 실패: {error.get('Key')} ({error.get('Message')})",
+                file=sys.stderr,
+            )
+        deleted += len(batch) - len(errors)
+    return deleted
+
+
+def confirm(question: str, assume_yes: bool) -> bool:
+    """되돌릴 수 없는 작업 전에 확인을 받는다."""
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print("확인을 받을 수 없습니다. 실행하려면 --yes 를 주세요.", file=sys.stderr)
+        return False
+    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+
+
+# -- 명령 -------------------------------------------------------------------------
+
+
+def cmd_ls(client: Any, args: argparse.Namespace) -> int:
+    bucket, key = parse_s3_uri(args.uri)
+    objects = list_objects(client, bucket, key)
+    if not objects:
+        print(f"s3://{bucket}/{key} 아래에 오브젝트가 없습니다.")
+        return 0
+
+    for obj in sorted(objects, key=lambda o: o["Key"]):
+        marker = "  <디렉터리 표시>" if obj["Key"].endswith("/") else ""
+        print(f"{obj['LastModified']:%Y-%m-%d %H:%M}  {human(obj['Size']):>10}  {obj['Key']}{marker}")
+    total = sum(o["Size"] for o in objects)
+    print(f"\n{len(objects)}개, 합계 {human(total)}")
+    return 0
+
+
+def iter_upload_pairs(source: str, key: str, recursive: bool) -> List[Tuple[str, str]]:
+    """(로컬 경로, S3 키) 쌍을 만든다."""
+    path = Path(source)
+    if path.is_dir():
+        if not recursive:
+            raise SystemExit(f"{source} 는 디렉터리입니다. --recursive 를 주세요.")
+        prefix = as_directory(key) if key else ""
+        pairs = []
+        for local in sorted(p for p in path.rglob("*") if p.is_file()):
+            # 원본 디렉터리 구조를 그대로 유지한다
+            relative = local.relative_to(path).as_posix()
+            pairs.append((str(local), prefix + relative))
+        return pairs
+
+    if not path.is_file():
+        raise SystemExit(f"파일을 찾을 수 없습니다: {source}")
+    # 대상이 디렉터리로 끝나면 파일 이름을 붙여준다
+    return [(str(path), key + path.name if key.endswith("/") or not key else key)]
+
+
+def cmd_upload(client: Any, args: argparse.Namespace) -> int:
+    bucket, key = parse_s3_uri(args.uri)
+    pairs = iter_upload_pairs(args.source, key, args.recursive)
+    if not pairs:
+        print(f"올릴 파일이 없습니다: {args.source}")
+        return 0
+
+    extra: Dict[str, str] = {}
+    if args.sse:
+        extra["ServerSideEncryption"] = args.sse
+
+    total_bytes = 0
+    for local, target in pairs:
+        size = os.path.getsize(local)
+        if args.dry_run:
+            print(f"[예행] {local} → s3://{bucket}/{target} ({human(size)})")
+            continue
+        # upload_file 은 큰 파일을 알아서 멀티파트로 나눠 올린다
+        client.upload_file(local, bucket, target, ExtraArgs=extra or None)
+        total_bytes += size
+        print(f"{local} → s3://{bucket}/{target} ({human(size)})")
+
+    if not args.dry_run:
+        print(f"\n{len(pairs)}개 업로드, 합계 {human(total_bytes)}")
+    return 0
+
+
+def cmd_mkdir(client: Any, args: argparse.Namespace) -> int:
+    bucket, key = parse_s3_uri(args.uri)
+    if not key:
+        raise SystemExit("만들 디렉터리 경로가 없습니다.")
+    marker = as_directory(key)
+
+    if args.dry_run:
+        print(f"[예행] 빈 오브젝트 생성: s3://{bucket}/{marker}")
+        return 0
+
+    client.put_object(Bucket=bucket, Key=marker, Body=b"")
+    print(f"디렉터리 표시를 만들었습니다: s3://{bucket}/{marker}")
+    print("  참고: S3에는 디렉터리가 없습니다. 파일을 올릴 때 미리 만들 필요는 없고,")
+    print("        콘솔에서 빈 폴더로 보이게 하려는 용도입니다.")
+    return 0
+
+
+def cmd_rm(client: Any, args: argparse.Namespace) -> int:
+    bucket, key = parse_s3_uri(args.uri)
+    if not key or key.endswith("/"):
+        raise SystemExit("파일 키를 지정하세요. 디렉터리를 지우려면 rmdir 을 쓰세요.")
+
+    from botocore.exceptions import ClientError
+
+    try:
+        meta = client.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code in ("404", "NoSuchKey"):
+            print(f"없는 파일입니다: s3://{bucket}/{key}", file=sys.stderr)
+            return 1
+        raise
+
+    print(f"삭제 대상: s3://{bucket}/{key} ({human(meta['ContentLength'])})")
+    if args.dry_run:
+        print("[예행] 지우지 않았습니다.")
+        return 0
+    if not confirm("지울까요?", args.yes):
+        print("취소했습니다.")
+        return 1
+
+    client.delete_object(Bucket=bucket, Key=key)
+    print("삭제했습니다.")
+    return 0
+
+
+def cmd_rmdir(client: Any, args: argparse.Namespace) -> int:
+    bucket, key = parse_s3_uri(args.uri)
+    # 접두사가 비면 버킷 전체가 지워진다. 실수를 막기 위해 반드시 막는다.
+    if not key.strip("/"):
+        raise SystemExit(
+            "접두사가 비어 있습니다. 버킷 전체를 지우는 것을 막기 위해 거부합니다."
+        )
+    prefix = as_directory(key)
+
+    objects = list_objects(client, bucket, prefix)
+    if not objects:
+        print(f"s3://{bucket}/{prefix} 아래에 지울 오브젝트가 없습니다.")
+        return 0
+
+    total = sum(o["Size"] for o in objects)
+    print(f"삭제 대상: s3://{bucket}/{prefix}")
+    for obj in sorted(objects, key=lambda o: o["Key"])[:10]:
+        print(f"  {obj['Key']}  ({human(obj['Size'])})")
+    if len(objects) > 10:
+        print(f"  ... 외 {len(objects) - 10}개")
+    print(f"모두 {len(objects)}개, 합계 {human(total)}")
+
+    if args.dry_run:
+        print("[예행] 지우지 않았습니다.")
+        return 0
+    if not confirm(f"{len(objects)}개를 모두 지울까요?", args.yes):
+        print("취소했습니다.")
+        return 1
+
+    deleted = delete_keys(client, bucket, [o["Key"] for o in objects])
+    print(f"{deleted}개 삭제했습니다.")
+    return 0 if deleted == len(objects) else 1
+
+
+COMMANDS = {
+    "ls": cmd_ls,
+    "upload": cmd_upload,
+    "mkdir": cmd_mkdir,
+    "rm": cmd_rm,
+    "rmdir": cmd_rmdir,
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="S3 파일·디렉터리 조작 예제",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "예시:\n"
+            "  s3_ops.py ls     s3://dw-stage/impala/\n"
+            "  s3_ops.py upload orders.csv s3://dw-stage/impala/\n"
+            "  s3_ops.py upload ./out/ s3://dw-stage/impala/out/ --recursive\n"
+            "  s3_ops.py mkdir  s3://dw-stage/impala/2026-08-03/\n"
+            "  s3_ops.py rm     s3://dw-stage/impala/orders.csv --yes\n"
+            "  s3_ops.py rmdir  s3://dw-stage/impala/2026-08-03/ --yes\n"
+        ),
+    )
+    parser.add_argument(
+        "-c", "--config", help="프로젝트 설정 파일. s3 섹션의 접속 정보를 재사용합니다."
+    )
+    parser.add_argument("--region", help="AWS 리전 (--config 없이 쓸 때)")
+    parser.add_argument(
+        "--endpoint-url", help="S3 호환 스토리지 엔드포인트 (MinIO 등)"
+    )
+    parser.add_argument(
+        "-n", "--dry-run", action="store_true", help="무엇을 할지만 보여주고 실행하지 않음"
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    ls = sub.add_parser("ls", help="접두사 아래 오브젝트 목록")
+    ls.add_argument("uri", help="s3://버킷/접두사")
+
+    upload = sub.add_parser("upload", help="파일 또는 디렉터리 업로드")
+    upload.add_argument("source", help="로컬 파일 또는 디렉터리")
+    upload.add_argument("uri", help="s3://버킷/키 (또는 s3://버킷/접두사/)")
+    upload.add_argument("-r", "--recursive", action="store_true", help="디렉터리 전체 업로드")
+    upload.add_argument("--sse", help="서버측 암호화 (예: AES256)")
+
+    mkdir = sub.add_parser("mkdir", help="디렉터리 표시용 빈 오브젝트 생성")
+    mkdir.add_argument("uri", help="s3://버킷/접두사/")
+
+    rm = sub.add_parser("rm", help="파일 하나 삭제")
+    rm.add_argument("uri", help="s3://버킷/키")
+    rm.add_argument("-y", "--yes", action="store_true", help="확인 없이 삭제")
+
+    rmdir = sub.add_parser("rmdir", help="접두사 아래 오브젝트 전체 삭제")
+    rmdir.add_argument("uri", help="s3://버킷/접두사/")
+    rmdir.add_argument("-y", "--yes", action="store_true", help="확인 없이 삭제")
+
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    client = make_client(args)
+    return COMMANDS[args.command](client, args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

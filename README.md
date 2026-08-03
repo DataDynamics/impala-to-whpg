@@ -226,8 +226,38 @@ impala_to_greenplum/
 examples/
   simple_load.py        # 설정 파일 없이 코드로 적재
   query_to_csv.py       # Impala 쿼리 → CSV 저장 (TLS + LDAP, 구간별 시간 측정)
+  s3_ops.py             # S3 업로드·삭제·디렉터리 생성/삭제·목록
   list_staged_files.py  # S3 스테이징 파일 목록 확인
 ```
+
+## S3 파일 다루기
+
+`examples/s3_ops.py`로 업로드, 삭제, 디렉터리 생성/삭제를 할 수 있습니다.
+
+```bash
+python examples/s3_ops.py ls     s3://dw-stage/impala/
+python examples/s3_ops.py upload orders.csv s3://dw-stage/impala/
+python examples/s3_ops.py upload ./out/ s3://dw-stage/impala/out/ --recursive
+python examples/s3_ops.py mkdir  s3://dw-stage/impala/2026-08-03/
+python examples/s3_ops.py rm     s3://dw-stage/impala/orders.csv --yes
+python examples/s3_ops.py rmdir  s3://dw-stage/impala/out/ --yes
+```
+
+**S3에는 디렉터리가 없습니다.** 키가 `a/b/c.csv`인 오브젝트가 있을 뿐이고, 콘솔이
+슬래시를 보고 폴더처럼 보여줄 뿐입니다. 그래서 이 스크립트에서는
+
+- `mkdir`은 `a/b/`라는 **빈 오브젝트**를 만듭니다. 콘솔에서 빈 폴더로 보이게 하는
+  용도이고, 파일을 올릴 때 상위 디렉터리를 미리 만들 필요는 없습니다.
+- `rmdir`은 그 접두사로 시작하는 오브젝트를 **전부** 지웁니다.
+
+삭제는 되돌릴 수 없어서 안전장치를 뒀습니다.
+
+- `--yes` 없이 실행하면 지울 목록을 보여주고 물어봅니다. 터미널이 아니면 거부합니다.
+- `-n`/`--dry-run`으로 무엇을 지울지만 확인할 수 있습니다.
+- `rmdir`에 접두사가 비어 있으면(`s3://버킷/`) **버킷 전체 삭제를 막기 위해 거부**합니다.
+
+접속 정보는 환경변수나 IAM 역할을 따르고, `--config config.yaml`을 주면 프로젝트
+설정의 `s3` 섹션을 그대로 재사용합니다. MinIO 등은 `--endpoint-url`을 쓰세요.
 
 ## Impala 쿼리를 CSV로 내려받기
 
