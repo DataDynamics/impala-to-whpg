@@ -1,6 +1,8 @@
 impyla>=0.18.0
 psycopg2-binary>=2.9.5
 PyYAML>=6.0
+# S3 스테이징(load_method: s3)에 필요. COPY 방식만 쓴다면 없어도 된다.
+boto3>=1.26.0
 # Kerberos 인증을 사용하는 Impala/Hive 환경에서만 필요
 # pure-sasl>=0.6.2
 # thrift-sasl>=0.4.3
