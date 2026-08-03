@@ -275,6 +275,41 @@ orders.csv  182.4MB  1,240,331행
 - 그 밖에 `--gzip`, `--delimiter`, `--null-string`, `--query-file`, `--set KEY=VALUE`를
   지원합니다. 자세한 건 `--help`를 보세요.
 
+### SQL 파일 지정하기
+
+`--query-file`로 여러 줄짜리 쿼리를 담은 `.sql` 파일을 넘길 수 있습니다.
+
+```bash
+python examples/query_to_csv.py --host ... --user ... \
+    --query-file daily_orders.sql --output orders.csv
+```
+
+파일은 다음을 알아서 처리합니다.
+
+- **BOM** — 윈도우 편집기로 저장한 `.sql`에 붙는 `U+FEFF`를 제거합니다. 남아 있으면
+  쿼리 첫 글자 앞에 보이지 않는 문자가 끼어 syntax error가 납니다.
+- **CRLF** — 윈도우 줄바꿈을 `\n`으로 읽습니다.
+- **끝의 세미콜론** — 뒤에 주석이나 빈 줄이 따라와도 떼어냅니다. Impala는 HS2로 받은
+  문장에 세미콜론이 붙어 있으면 syntax error를 냅니다.
+- **주석** — 앞뒤 `--`, `/* */` 주석은 그대로 둡니다. 주석이나 문자열 안의 세미콜론은
+  문장 구분자로 보지 않으므로 `WHERE memo = 'a;b'` 같은 조건도 안전합니다.
+
+문장이 두 개 이상이면 어떤 문장들을 찾았는지 알려주고 멈춥니다. 이 스크립트는
+한 번에 한 문장만 실행합니다.
+
+`--debug`를 주면 **실제로 서버에 보내는 SQL**을 출력하므로, 파일이 의도대로 읽혔는지
+바로 확인할 수 있습니다.
+
+```
+--- 실행할 SQL ---
+SELECT
+    order_id,
+    amount
+FROM sales.orders
+WHERE dt = '2026-08-01'
+------------------
+```
+
 ### Thrift EOF 오류가 날 때
 
 `TSocket read 0 bytes`, `end of file` 같은 오류는 **서버가 핸드셰이크 도중 연결을

@@ -332,6 +332,107 @@ def transport_error_hint(args: argparse.Namespace) -> str:
     return "\n".join(lines)
 
 
+def split_statements(sql: str) -> List[str]:
+    """SQL을 문장 단위로 나눈다. 내용이 있는 조각만 돌려준다.
+
+    문자열 리터럴이나 주석 안의 세미콜론은 구분자로 보지 않는다.
+    ``WHERE memo = 'a;b'`` 를 두 문장으로 쪼개면 안 되기 때문이다.
+    """
+    statements: List[str] = []
+    start = 0
+    index = 0
+    length = len(sql)
+
+    while index < length:
+        char = sql[index]
+
+        if sql.startswith("--", index):
+            newline = sql.find("\n", index)
+            index = length if newline < 0 else newline + 1
+            continue
+        if sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+            continue
+        if char in "'\"`":
+            quote = char
+            index += 1
+            while index < length:
+                if sql[index] == "\\" and quote != "`":
+                    index += 2  # 이스케이프된 문자
+                    continue
+                if sql[index] == quote:
+                    if index + 1 < length and sql[index + 1] == quote:
+                        index += 2  # 따옴표 두 번은 따옴표 한 글자
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if char == ";":
+            statements.append(sql[start:index])
+            start = index + 1
+        index += 1
+
+    statements.append(sql[start:])
+    return [s for s in statements if has_sql_content(s)]
+
+
+def has_sql_content(fragment: str) -> bool:
+    """주석과 공백을 뺀 실제 SQL이 들어 있는지 본다."""
+    index = 0
+    length = len(fragment)
+    while index < length:
+        if fragment.startswith("--", index):
+            newline = fragment.find("\n", index)
+            index = length if newline < 0 else newline + 1
+            continue
+        if fragment.startswith("/*", index):
+            end = fragment.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+            continue
+        if not fragment[index].isspace():
+            return True
+        index += 1
+    return False
+
+
+def normalize_query(sql: str) -> str:
+    """읽어온 SQL을 실행할 수 있는 형태로 다듬는다.
+
+    - BOM을 없앤다. 윈도우 편집기로 저장한 .sql 파일에는 앞머리에 U+FEFF가
+      붙는 경우가 많은데, ``strip()`` 으로는 지워지지 않아 그대로 남으면
+      쿼리 첫 글자 앞에 보이지 않는 문자가 끼어 syntax error가 난다.
+    - 문장 끝의 세미콜론을 떼어낸다. 뒤에 주석이나 빈 줄이 따라와도 된다.
+      Impala는 HS2로 받은 문장에 세미콜론이 붙어 있으면 syntax error를 낸다.
+    - 여러 줄로 이어진 한 문장은 그대로 둔다. 줄바꿈은 문제가 되지 않는다.
+    """
+    sql = sql.replace("﻿", "")
+    statements = split_statements(sql)
+
+    if not statements:
+        raise SystemExit("실행할 SQL이 없습니다. 파일이 비었거나 주석만 있습니다.")
+    if len(statements) > 1:
+        preview = " / ".join(" ".join(s.split())[:40] for s in statements[:3])
+        raise SystemExit(
+            f"SQL 문장이 {len(statements)}개입니다. 이 스크립트는 한 번에 하나만 실행합니다.\n"
+            f"  발견한 문장: {preview}{' ...' if len(statements) > 3 else ''}"
+        )
+    return statements[0].strip()
+
+
+def read_query(args: argparse.Namespace) -> str:
+    """``--query`` 또는 ``--query-file`` 에서 SQL을 읽어 다듬는다."""
+    if args.query_file:
+        # utf-8-sig는 BOM이 있으면 벗기고 없으면 utf-8과 똑같이 읽는다.
+        # 줄바꿈은 기본 유니버설 개행 처리로 CRLF도 \n으로 들어온다.
+        with open(args.query_file, "r", encoding="utf-8-sig") as fp:
+            sql = fp.read()
+    else:
+        sql = args.query
+    return normalize_query(sql)
+
+
 def parse_session_settings(items: Sequence[str]) -> Dict[str, str]:
     """``KEY=VALUE`` 목록을 세션 설정 딕셔너리로 바꾼다."""
     settings: Dict[str, str] = {}
@@ -520,12 +621,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     timer = PhaseTimer(PHASES)
 
-    query = args.query
-    if args.query_file:
-        with open(args.query_file, "r", encoding="utf-8") as fp:
-            query = fp.read()
-    query = query.strip().rstrip(";")
-
+    query = read_query(args)
     session_settings = parse_session_settings(args.set)
     password = resolve_password(args) if args.auth_mechanism != NO_AUTH else None
     connect_kwargs = build_connect_kwargs(args, password)
@@ -539,6 +635,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logging.basicConfig(
             level=logging.DEBUG, stream=sys.stderr, format="%(name)s %(levelname)s %(message)s"
         )
+        # 실제로 서버에 보내는 SQL을 그대로 보여준다(BOM·세미콜론 정리 후)
+        print(f"--- 실행할 SQL ---\n{query}\n------------------", file=sys.stderr)
 
     try:
         dbapi = import_impala_dbapi()
