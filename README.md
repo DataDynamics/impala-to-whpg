@@ -256,8 +256,32 @@ python examples/s3_ops.py rmdir  s3://dw-stage/impala/out/ --yes
 - `-n`/`--dry-run`으로 무엇을 지울지만 확인할 수 있습니다.
 - `rmdir`에 접두사가 비어 있으면(`s3://버킷/`) **버킷 전체 삭제를 막기 위해 거부**합니다.
 
-접속 정보는 환경변수나 IAM 역할을 따르고, `--config config.yaml`을 주면 프로젝트
-설정의 `s3` 섹션을 그대로 재사용합니다. MinIO 등은 `--endpoint-url`을 쓰세요.
+### 접속 옵션
+
+| 옵션 | 설명 |
+| --- | --- |
+| `-b`, `--bucket` | 기본 버킷. 주면 경로를 `s3://` 없이 키만 쓸 수 있습니다. |
+| `--access-key` | AWS 액세스 키 |
+| `--secret-key` | AWS 시크릿 키 |
+| `--session-token` | 임시 자격증명(STS)의 세션 토큰 |
+| `--region` | AWS 리전 |
+| `--endpoint` | S3 호환 스토리지 엔드포인트 (MinIO 등) |
+| `-c`, `--config` | 프로젝트 설정 파일의 `s3` 섹션 재사용 |
+
+```bash
+# 버킷을 미리 주면 키만 써도 됩니다
+python examples/s3_ops.py --bucket dw-stage ls impala/
+
+# MinIO 등 S3 호환 스토리지
+python examples/s3_ops.py --endpoint http://minio:9000 --bucket dw-stage \
+    --access-key minioadmin --secret-key minioadmin ls /
+```
+
+우선순위는 **명령행 > 설정 파일 > 환경변수/IAM 역할** 입니다. 아무것도 주지 않으면
+boto3 기본 자격증명 체인(`AWS_ACCESS_KEY_ID` 등, IAM 역할)이 그대로 동작합니다.
+
+**시크릿 키를 명령행에 적으면 `ps`로 다른 사용자에게 보입니다.** 공용 서버에서는
+`AWS_SECRET_ACCESS_KEY` 환경변수나 `--config`를 쓰세요.
 
 ## Impala 쿼리를 CSV로 내려받기
 

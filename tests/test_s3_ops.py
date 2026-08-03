@@ -100,8 +100,12 @@ def args_for(command: str, **overrides) -> argparse.Namespace:
     options = dict(
         command=command,
         config=None,
+        bucket=None,
+        access_key=None,
+        secret_key=None,
+        session_token=None,
         region=None,
-        endpoint_url=None,
+        endpoint=None,
         dry_run=False,
         yes=True,
         recursive=False,
@@ -129,6 +133,151 @@ def test_parse_s3_uri_rejects_bad_input(bad):
 def test_as_directory():
     assert s.as_directory("a/b") == "a/b/"
     assert s.as_directory("a/b/") == "a/b/"
+
+
+def test_resolve_target_prefers_uri_over_default_bucket():
+    assert s.resolve_target("s3://from-uri/key", "from-flag") == ("from-uri", "key")
+
+
+def test_resolve_target_uses_default_bucket_for_bare_key():
+    assert s.resolve_target("impala/orders.csv", "dw-stage") == ("dw-stage", "impala/orders.csv")
+    assert s.resolve_target("/impala/", "dw-stage") == ("dw-stage", "impala/")
+    assert s.resolve_target("", "dw-stage") == ("dw-stage", "")
+
+
+def test_resolve_target_without_bucket_explains():
+    with pytest.raises(SystemExit, match="--bucket"):
+        s.resolve_target("impala/orders.csv", None)
+
+
+def test_bare_key_works_with_bucket_flag():
+    """--bucket 을 주면 모든 명령이 s3:// 없이 동작한다."""
+    client = FakeS3Client({"impala/a.csv": b"1"})
+    assert s.cmd_ls(client, args_for("ls", uri="impala/"), "dw-stage") == 0
+    assert s.cmd_rm(client, args_for("rm", uri="impala/a.csv"), "dw-stage") == 0
+    assert client.objects == {}
+
+
+# -- 자격증명과 엔드포인트 --------------------------------------------------------
+
+
+@pytest.fixture
+def fake_boto3(monkeypatch):
+    """boto3.session.Session 호출 인자를 기록한다."""
+    import types
+
+    calls = {}
+    client = FakeS3Client()
+
+    class Session:
+        def __init__(self, **kwargs):
+            calls["session"] = kwargs
+
+        def client(self, name, endpoint_url=None):
+            calls["client"] = {"name": name, "endpoint_url": endpoint_url}
+            return client
+
+    session_module = types.ModuleType("boto3.session")
+    session_module.Session = Session
+    boto3 = types.ModuleType("boto3")
+    boto3.session = session_module
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    monkeypatch.setitem(sys.modules, "boto3.session", session_module)
+    return calls
+
+
+def test_credentials_are_passed_to_boto3(fake_boto3):
+    args = args_for(
+        "ls",
+        access_key="AKIA...",
+        secret_key="secret...",
+        session_token="token...",
+        region="ap-northeast-2",
+        endpoint="http://minio:9000",
+        bucket="dw-stage",
+    )
+    client, bucket = s.make_client(args)
+
+    assert fake_boto3["session"] == {
+        "aws_access_key_id": "AKIA...",
+        "aws_secret_access_key": "secret...",
+        "aws_session_token": "token...",
+        "region_name": "ap-northeast-2",
+    }
+    assert fake_boto3["client"]["endpoint_url"] == "http://minio:9000"
+    assert bucket == "dw-stage"
+
+
+def test_missing_credentials_fall_back_to_boto3_chain(fake_boto3):
+    """키를 주지 않으면 None이 넘어가 환경변수/IAM 역할이 그대로 쓰인다."""
+    s.make_client(args_for("ls"))
+
+    assert fake_boto3["session"] == {
+        "aws_access_key_id": None,
+        "aws_secret_access_key": None,
+        "aws_session_token": None,
+        "region_name": None,
+    }
+    # endpoint_url 은 빈 값이면 None 이어야 boto3 기본 주소를 쓴다
+    assert fake_boto3["client"]["endpoint_url"] is None
+
+
+def test_endpoint_url_alias_is_accepted():
+    parser = s.build_parser()
+    assert parser.parse_args(["--endpoint", "http://x", "ls", "s3://b/"]).endpoint == "http://x"
+    assert parser.parse_args(["--endpoint-url", "http://x", "ls", "s3://b/"]).endpoint == "http://x"
+
+
+def test_connection_options_exist():
+    parser = s.build_parser()
+    options = {o for a in parser._actions for o in a.option_strings}
+    for expected in ("--access-key", "--secret-key", "--bucket", "--endpoint", "--region"):
+        assert expected in options
+
+
+def test_config_values_are_overridden_by_flags(tmp_path, monkeypatch):
+    """설정 파일보다 명령행 인자가 우선한다."""
+    captured = {}
+
+    class FakeStager:
+        def __init__(self, config):
+            captured["config"] = config
+
+        @property
+        def client(self):
+            return FakeS3Client()
+
+    import types
+
+    s3_config = types.SimpleNamespace(
+        bucket="from-config",
+        access_key_id="config-key",
+        secret_access_key="config-secret",
+        session_token=None,
+        region="us-east-1",
+        client_endpoint_url=None,
+    )
+    package = types.ModuleType("impala_to_greenplum")
+    package.load_config = lambda path: types.SimpleNamespace(s3=s3_config)
+    stage_module = types.ModuleType("impala_to_greenplum.s3_stage")
+    stage_module.S3Stager = FakeStager
+    monkeypatch.setitem(sys.modules, "impala_to_greenplum", package)
+    monkeypatch.setitem(sys.modules, "impala_to_greenplum.s3_stage", stage_module)
+
+    _, bucket = s.make_client(
+        args_for(
+            "ls",
+            config=str(tmp_path / "config.yaml"),
+            access_key="cli-key",
+            endpoint="http://minio:9000",
+            bucket="cli-bucket",
+        )
+    )
+
+    assert captured["config"].access_key_id == "cli-key"          # 덮어씀
+    assert captured["config"].secret_access_key == "config-secret"  # 안 준 값은 유지
+    assert captured["config"].client_endpoint_url == "http://minio:9000"
+    assert bucket == "cli-bucket"
 
 
 # -- 목록 -------------------------------------------------------------------------

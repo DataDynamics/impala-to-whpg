@@ -54,11 +54,27 @@ def human(size: float) -> str:
     return f"{size:,.1f}GB"
 
 
-def make_client(args: argparse.Namespace) -> Any:
-    """boto3 S3 클라이언트를 만든다.
+def resolve_target(uri: str, default_bucket: Optional[str]) -> Tuple[str, str]:
+    """경로를 (버킷, 키)로 푼다.
 
-    ``--config`` 를 주면 프로젝트 설정의 s3 섹션을 재사용하고, 없으면 환경변수나
-    IAM 역할 등 boto3 기본 자격증명 체인을 따른다.
+    ``s3://버킷/키`` 형태면 그대로 쓰고, 버킷 없이 키만 준 경우에는
+    ``--bucket`` 이나 설정 파일의 버킷을 쓴다.
+    """
+    if uri.startswith("s3://"):
+        return parse_s3_uri(uri)
+    if not default_bucket:
+        raise SystemExit(
+            f"버킷을 알 수 없습니다: {uri!r}\n"
+            "  s3://버킷/키 형식으로 주거나 --bucket 을 지정하세요."
+        )
+    return default_bucket, uri.lstrip("/")
+
+
+def make_client(args: argparse.Namespace) -> Tuple[Any, Optional[str]]:
+    """boto3 S3 클라이언트와 기본 버킷을 만든다.
+
+    자격증명 우선순위는 명령행 > 설정 파일 > 환경변수/IAM 역할 순이다.
+    ``--access-key`` 를 주지 않으면 boto3 기본 자격증명 체인이 그대로 동작한다.
     """
     if args.config:
         # 저장소를 설치하지 않고도 돌도록 최상위를 경로에 넣는다
@@ -69,12 +85,30 @@ def make_client(args: argparse.Namespace) -> Any:
         config = load_config(args.config)
         if config.s3 is None:
             raise SystemExit(f"{args.config} 에 s3 섹션이 없습니다.")
-        return S3Stager(config.s3).client
+
+        # 명령행으로 준 값이 설정 파일보다 우선한다
+        s3_config = config.s3
+        if args.access_key:
+            s3_config.access_key_id = args.access_key
+        if args.secret_key:
+            s3_config.secret_access_key = args.secret_key
+        if args.session_token:
+            s3_config.session_token = args.session_token
+        if args.region:
+            s3_config.region = args.region
+        if args.endpoint:
+            s3_config.client_endpoint_url = args.endpoint
+        return S3Stager(s3_config).client, args.bucket or s3_config.bucket
 
     import boto3
 
-    session = boto3.session.Session(region_name=args.region)
-    return session.client("s3", endpoint_url=args.endpoint_url or None)
+    session = boto3.session.Session(
+        aws_access_key_id=args.access_key,
+        aws_secret_access_key=args.secret_key,
+        aws_session_token=args.session_token,
+        region_name=args.region,
+    )
+    return session.client("s3", endpoint_url=args.endpoint or None), args.bucket
 
 
 def list_objects(client: Any, bucket: str, prefix: str) -> List[Dict[str, Any]]:
@@ -122,8 +156,8 @@ def confirm(question: str, assume_yes: bool) -> bool:
 # -- 명령 -------------------------------------------------------------------------
 
 
-def cmd_ls(client: Any, args: argparse.Namespace) -> int:
-    bucket, key = parse_s3_uri(args.uri)
+def cmd_ls(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    bucket, key = resolve_target(args.uri, bucket)
     objects = list_objects(client, bucket, key)
     if not objects:
         print(f"s3://{bucket}/{key} 아래에 오브젝트가 없습니다.")
@@ -157,8 +191,8 @@ def iter_upload_pairs(source: str, key: str, recursive: bool) -> List[Tuple[str,
     return [(str(path), key + path.name if key.endswith("/") or not key else key)]
 
 
-def cmd_upload(client: Any, args: argparse.Namespace) -> int:
-    bucket, key = parse_s3_uri(args.uri)
+def cmd_upload(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    bucket, key = resolve_target(args.uri, bucket)
     pairs = iter_upload_pairs(args.source, key, args.recursive)
     if not pairs:
         print(f"올릴 파일이 없습니다: {args.source}")
@@ -184,8 +218,8 @@ def cmd_upload(client: Any, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_mkdir(client: Any, args: argparse.Namespace) -> int:
-    bucket, key = parse_s3_uri(args.uri)
+def cmd_mkdir(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    bucket, key = resolve_target(args.uri, bucket)
     if not key:
         raise SystemExit("만들 디렉터리 경로가 없습니다.")
     marker = as_directory(key)
@@ -201,8 +235,8 @@ def cmd_mkdir(client: Any, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_rm(client: Any, args: argparse.Namespace) -> int:
-    bucket, key = parse_s3_uri(args.uri)
+def cmd_rm(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    bucket, key = resolve_target(args.uri, bucket)
     if not key or key.endswith("/"):
         raise SystemExit("파일 키를 지정하세요. 디렉터리를 지우려면 rmdir 을 쓰세요.")
 
@@ -230,8 +264,8 @@ def cmd_rm(client: Any, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_rmdir(client: Any, args: argparse.Namespace) -> int:
-    bucket, key = parse_s3_uri(args.uri)
+def cmd_rmdir(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    bucket, key = resolve_target(args.uri, bucket)
     # 접두사가 비면 버킷 전체가 지워진다. 실수를 막기 위해 반드시 막는다.
     if not key.strip("/"):
         raise SystemExit(
@@ -285,14 +319,45 @@ def build_parser() -> argparse.ArgumentParser:
             "  s3_ops.py mkdir  s3://dw-stage/impala/2026-08-03/\n"
             "  s3_ops.py rm     s3://dw-stage/impala/orders.csv --yes\n"
             "  s3_ops.py rmdir  s3://dw-stage/impala/2026-08-03/ --yes\n"
+            "\n"
+            "  # --bucket 을 주면 s3:// 없이 키만 써도 됩니다\n"
+            "  s3_ops.py --bucket dw-stage ls impala/\n"
+            "\n"
+            "  # MinIO 등 S3 호환 스토리지\n"
+            "  s3_ops.py --endpoint http://minio:9000 --bucket dw-stage \\\n"
+            "            --access-key minioadmin --secret-key minioadmin ls /\n"
         ),
     )
-    parser.add_argument(
+    connection = parser.add_argument_group("접속")
+    connection.add_argument(
         "-c", "--config", help="프로젝트 설정 파일. s3 섹션의 접속 정보를 재사용합니다."
     )
-    parser.add_argument("--region", help="AWS 리전 (--config 없이 쓸 때)")
-    parser.add_argument(
-        "--endpoint-url", help="S3 호환 스토리지 엔드포인트 (MinIO 등)"
+    connection.add_argument(
+        "-b",
+        "--bucket",
+        help="기본 버킷. 지정하면 경로를 s3:// 없이 키만 줄 수 있습니다.",
+    )
+    connection.add_argument(
+        "--access-key",
+        metavar="KEY",
+        help="AWS 액세스 키. 생략하면 AWS_ACCESS_KEY_ID 환경변수나 IAM 역할을 씁니다.",
+    )
+    connection.add_argument(
+        "--secret-key",
+        metavar="SECRET",
+        help="AWS 시크릿 키. 명령행에 적으면 ps로 다른 사용자에게 보이므로, "
+        "가능하면 AWS_SECRET_ACCESS_KEY 환경변수를 쓰세요.",
+    )
+    connection.add_argument(
+        "--session-token", metavar="TOKEN", help="임시 자격증명(STS)을 쓸 때의 세션 토큰"
+    )
+    connection.add_argument("--region", help="AWS 리전")
+    connection.add_argument(
+        "--endpoint",
+        "--endpoint-url",
+        dest="endpoint",
+        metavar="URL",
+        help="S3 호환 스토리지 엔드포인트 (MinIO 등). 예: http://minio.example.com:9000",
     )
     parser.add_argument(
         "-n", "--dry-run", action="store_true", help="무엇을 할지만 보여주고 실행하지 않음"
@@ -325,8 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    client = make_client(args)
-    return COMMANDS[args.command](client, args)
+    client, bucket = make_client(args)
+    return COMMANDS[args.command](client, args, bucket)
 
 
 if __name__ == "__main__":
