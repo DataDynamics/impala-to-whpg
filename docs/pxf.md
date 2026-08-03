@@ -84,36 +84,57 @@ s3:
   pxf_server: s3srv     # → ...&SERVER=s3srv
 ```
 
-## 1. pxf-profiles.xml 에 프로파일 추가
+## 1. pxf-profiles.xml — 대부분 건드릴 필요가 없습니다
 
-`s3:text`, `s3:parquet` 같은 기본 프로파일은 이미 정의되어 있으므로 보통은 그대로
-쓰면 됩니다. **옵션 기본값을 고정하고 싶을 때만** 직접 프로파일을 추가합니다.
-예를 들어 이 프로젝트가 올리는 파일은 탭 구분 gzip TSV라, 매번
-`CREATE EXTERNAL TABLE` 에 같은 옵션을 쓰는 대신 프로파일로 굳혀둘 수 있습니다.
+`s3:text`, `s3:parquet` 같은 기본 프로파일은 이미 정의되어 있습니다. 이 프로젝트가
+올리는 탭 구분 gzip TSV도 기본 `s3:text` 로 그대로 읽히므로, **먼저 커스텀 프로파일
+없이 되는지 확인하세요.** 포맷 옵션은 외부 테이블 쪽에 적으면 됩니다.
+
+```sql
+CREATE EXTERNAL TABLE staging.ext_orders (...)
+LOCATION ('pxf://dw-stage/impala-to-greenplum/orders-9f2c/?PROFILE=s3:text&SERVER=s3srv')
+FORMAT 'TEXT' (DELIMITER E'\t' NULL E'\\N');
+```
+
+`pxf-profiles.xml` 을 잘못 쓰면 PXF가 아예 뜨지 않고 시작 단계에서
+`ProfileConf` 초기화 NPE로 죽습니다. 아래 [ProfileConf 초기화 NPE](#profileconf-초기화-npe)
+를 참고하세요. 얻는 것에 비해 위험이 큰 편이라, 같은 옵션을 반복해서 쓰는 게
+정말 번거로울 때만 손대는 편이 낫습니다.
+
+### 그래도 프로파일을 추가한다면
 
 `$PXF_BASE/conf/pxf-profiles.xml` 을 편집합니다. 이 파일은 기본 정의를 덮어쓰는
 용도이고, 여기에 없는 프로파일은 `pxf-profiles-default.xml` 의 정의가 쓰입니다.
 
+**직접 타이핑하지 말고 기본 정의를 통째로 복사한 뒤 이름만 바꾸세요.**
+`<plugins>` 안의 클래스 이름과 함께 있어야 하는 요소가 PXF 버전마다 다릅니다.
+
+```bash
+# 설치본에서 s3:text 정의를 그대로 꺼내온다
+sed -n '/<name>s3:text<\/name>/,/<\/profile>/p' \
+    "$PXF_HOME/conf/pxf-profiles-default.xml"
+```
+
+꺼낸 `<profile>` 블록을 `<profiles>` 안에 붙여넣고, `<name>` 만 바꾼 뒤 필요한
+`<optionMappings>` 를 더합니다.
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <profiles>
-    <!--
-      기본 s3:text 를 그대로 두고, 우리 스테이징 파일 전용 프로파일을 하나 더 만든다.
-      plugins 안의 클래스 이름은 설치된 PXF 버전의 기본 정의에서 그대로 복사할 것.
-      확인 방법:
-          grep -A 12 '<name>s3:text</name>' \
-              "$PXF_HOME/conf/pxf-profiles-default.xml"
-    -->
     <profile>
+        <!-- name 은 반드시 있어야 한다. 비거나 없으면 시작 시 NPE 가 난다 -->
         <name>s3:impala-staging</name>
-        <protocol>s3</protocol>
+
+        <!-- 여기부터는 pxf-profiles-default.xml 의 s3:text 블록을 그대로 복사한 것.
+             plugins/protocol/handler 구성은 버전마다 다르므로 임의로 지우거나
+             더하지 말고 통째로 옮길 것. -->
         <plugins>
-            <fragmenter>org.greenplum.pxf.plugins.hdfs.HdfsDataFragmenter</fragmenter>
-            <accessor>org.greenplum.pxf.plugins.hdfs.LineBreakAccessor</accessor>
-            <resolver>org.greenplum.pxf.plugins.hdfs.StringPassResolver</resolver>
+            <fragmenter>...설치본에서 복사...</fragmenter>
+            <accessor>...설치본에서 복사...</accessor>
+            <resolver>...설치본에서 복사...</resolver>
         </plugins>
+
         <optionMappings>
-            <!-- LOCATION 의 &옵션=값 을 내부 설정 키로 연결한다 -->
             <mapping>
                 <option>COMPRESSION_CODEC</option>
                 <property>compression.codec</property>
@@ -123,8 +144,6 @@ s3:
 </profiles>
 ```
 
-`<plugins>` 안의 클래스 이름은 **PXF 버전마다 다를 수 있습니다.** 위 값을 그대로
-믿지 말고, 설치본의 `pxf-profiles-default.xml` 에서 `s3:text` 정의를 찾아 복사하세요.
 없는 클래스를 적으면 조회 시점에 `ClassNotFoundException` 이 납니다.
 
 편집한 뒤에는 **반드시 전 노드에 배포하고 재시작**해야 반영됩니다.
@@ -262,6 +281,7 @@ SELECT * FROM ext_probe LIMIT 5;
 
 | 증상 | 확인할 것 |
 | --- | --- |
+| 시작 시 `ProfileConf` NPE | `pxf-profiles.xml` 구조. 아래 절 참고. |
 | `ClassNotFoundException` | `pxf-profiles.xml` 의 플러그인 클래스 이름. 설치본 기본 정의와 대조하세요. |
 | `Profile ... is not defined` | 프로파일 오타이거나 `pxf cluster sync` 를 빠뜨렸습니다. |
 | `Failed to connect to ... 5888` | 해당 세그먼트 호스트의 PXF가 죽어 있습니다. `pxf cluster status` |
@@ -271,6 +291,106 @@ SELECT * FROM ext_probe LIMIT 5;
 
 로그는 각 세그먼트 호스트의 `$PXF_LOGDIR/pxf-service.log` 에 쌓입니다. 실패한
 호스트에서 직접 열어보는 게 가장 빠릅니다.
+
+## ProfileConf 초기화 NPE
+
+`ProfileConf` 는 PXF가 시작하면서 `pxf-profiles-default.xml` 과
+`pxf-profiles.xml` 을 읽어 프로파일 목록을 만드는 클래스입니다. 여기서
+`NullPointerException` 이 나면 **XML 문법은 맞지만 필수 요소가 빠졌다**는 뜻입니다.
+문법이 깨졌다면 파싱 오류가 났을 테니까요.
+
+### 원인 후보 (흔한 순서)
+
+**1. `<profile>` 안에 `<name>` 이 없거나 비어 있음** — 가장 흔합니다.
+
+PXF는 프로파일 이름을 소문자로 바꿔 맵의 키로 씁니다. 이름이 없으면 그 시점에
+바로 NPE가 납니다. 아래는 전부 같은 결과를 냅니다.
+
+```xml
+<!-- 이름이 없다 -->
+<profile>
+    <plugins>...</plugins>
+</profile>
+
+<!-- 비어 있다 -->
+<profile>
+    <name></name>
+    <plugins>...</plugins>
+</profile>
+
+<!-- 태그 이름 오타 -->
+<profile>
+    <n>s3:my</n>
+    <plugins>...</plugins>
+</profile>
+```
+
+주석을 지우다가 빈 `<profile/>` 하나가 남는 경우도 같은 증상입니다.
+
+**2. 루트 요소가 `<profiles>` 가 아님** — `<configuration>` 이나 다른 이름으로
+감싸면 프로파일을 찾지 못합니다.
+
+**3. `<plugins>` 블록이 통째로 없음** — 이름만 있고 플러그인 정의가 없으면
+플러그인 맵을 만드는 단계에서 NPE가 날 수 있습니다.
+
+**4. 요소 중첩이 어긋남** — `<plugins>` 가 `<profile>` 밖에 있거나, `<mapping>` 이
+`<optionMappings>` 밖에 있는 경우.
+
+### 좁히는 순서
+
+빈 파일로 바꿔 시작되는지부터 확인하면 원인이 파일 안에 있는지 밖에 있는지
+바로 갈립니다.
+
+```bash
+# 1) 현재 파일을 백업하고 빈 정의로 교체
+cp "$PXF_BASE/conf/pxf-profiles.xml" /tmp/pxf-profiles.xml.bak
+cat > "$PXF_BASE/conf/pxf-profiles.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<profiles>
+</profiles>
+XML
+
+pxf cluster sync && pxf cluster restart
+pxf cluster status
+```
+
+여기서 정상적으로 뜨면 원인은 확실히 그 파일 안에 있습니다. 백업한 파일에서
+프로파일을 하나씩 되살리며 어느 것이 문제인지 좁힙니다.
+
+```bash
+# 2) 문법과 구조 확인
+xmllint --noout /tmp/pxf-profiles.xml.bak        # 문법
+xmllint --xpath 'count(//profile)' /tmp/pxf-profiles.xml.bak      # 프로파일 개수
+xmllint --xpath 'count(//profile[not(name) or name=""])' \
+        /tmp/pxf-profiles.xml.bak                # 이름 없는 프로파일 개수 → 0이어야 한다
+```
+
+마지막 명령이 0이 아니면 그게 원인입니다.
+
+```bash
+# 3) 전체 스택 트레이스 확인
+grep -n -A 30 "ProfileConf" "$PXF_LOGDIR/pxf-service.log" | head -50
+```
+
+NPE가 난 줄 번호를 보면 이름 처리 단계인지 플러그인 처리 단계인지 갈립니다.
+
+### 되돌리기
+
+원인을 찾기 전이라도 서비스는 바로 살릴 수 있습니다. `pxf-profiles.xml` 을 비우면
+기본 정의(`pxf-profiles-default.xml`)만 쓰게 되고, `s3:text` 같은 기본 프로파일은
+그대로 동작합니다.
+
+```bash
+cat > "$PXF_BASE/conf/pxf-profiles.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<profiles>
+</profiles>
+XML
+pxf cluster sync && pxf cluster restart
+```
+
+`pxf-profiles-default.xml` 은 **직접 고치지 마세요.** 업그레이드 때 덮어써지고,
+잘못 고치면 모든 프로파일이 함께 죽습니다.
 
 ## 내장 s3 프로토콜과 비교
 
