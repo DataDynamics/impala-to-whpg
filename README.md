@@ -32,12 +32,19 @@ pip install -r requirements.txt
 
 ```bash
 cp config.yaml config.local.yaml
+
+export IMPALA_USER='etl_user'     # Impala LDAP 계정
+export IMPALA_PASSWORD='...'
 export GP_PASSWORD='...'
 
 python -m impala_to_greenplum --config config.local.yaml            # 전체 작업 실행
 python -m impala_to_greenplum --config config.local.yaml -j orders  # 특정 작업만 실행
 python -m impala_to_greenplum --config config.local.yaml -v         # 디버그 로그
 ```
+
+예제 설정은 Impala에 **TLS + LDAP**으로 접속합니다(`auth_mechanism: PLAIN`,
+`use_ssl: true`). 인증이 없는 환경이라면 `auth_mechanism: NOSASL`로 바꾸고
+`user`/`password`/`use_ssl`/`ca_cert`를 지우세요. Kerberos는 `GSSAPI`입니다.
 
 ### 설정 파일 두 개의 역할
 

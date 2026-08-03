@@ -5,13 +5,20 @@ impala:
   host: impala.example.com
   port: 21050
   database: default
-  # NOSASL(기본) | PLAIN(LDAP) | GSSAPI(Kerberos)
+  # 인증 방식: NOSASL(인증 없음) | PLAIN(LDAP) | GSSAPI(Kerberos)
   auth_mechanism: NOSASL
+
+  # TLS + LDAP 조합을 쓴다면 아래 네 줄을 함께 켠다 (config.yaml 참고)
   # auth_mechanism: PLAIN
   # user: ${IMPALA_USER}
   # password: ${IMPALA_PASSWORD}
   # use_ssl: true
-  # ca_cert: /etc/ssl/certs/impala-ca.pem
+  # ca_cert: /etc/ssl/certs/impala-ca.pem      # 생략 시 인증서 검증 안 함
+
+  # Kerberos라면
+  # auth_mechanism: GSSAPI
+  # kerberos_service_name: impala
+  # use_ssl: true
   session_settings:
     MEM_LIMIT: 8g
 

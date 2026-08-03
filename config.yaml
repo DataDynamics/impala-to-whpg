@@ -13,8 +13,20 @@ impala:
   host: impala.example.com
   port: 21050
   database: sales
-  # NOSASL(기본) | PLAIN(LDAP) | GSSAPI(Kerberos)
-  auth_mechanism: NOSASL
+
+  # LDAP 인증. impyla에서는 PLAIN이 사용자/비밀번호 인증(LDAP)을 뜻합니다.
+  # (NOSASL = 인증 없음, GSSAPI = Kerberos)
+  auth_mechanism: PLAIN
+  user: ${IMPALA_USER}
+  password: ${IMPALA_PASSWORD}
+
+  # TLS. ca_cert를 지정해야 서버 인증서를 검증합니다.
+  # 생략하면 통신은 암호화되지만 상대가 진짜 서버인지는 확인하지 않습니다.
+  use_ssl: true
+  ca_cert: /etc/ssl/certs/impala-ca.pem
+
+  session_settings:
+    MEM_LIMIT: 8g
 
 greenplum:
   host: greenplum.example.com
