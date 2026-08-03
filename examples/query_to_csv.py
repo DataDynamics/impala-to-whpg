@@ -84,6 +84,64 @@ def import_impala_dbapi() -> Any:
     return dbapi
 
 
+class CyrusSASLClient:
+    """Cyrus SASL(``sasl`` 패키지)을 impyla가 기대하는 인터페이스로 감싼다.
+
+    impyla는 SASL 클라이언트로 ``puresasl`` 을 고정해서 쓴다. Cyrus SASL을 쓰려면
+    ``impala.sasl_compat.PureSASLClient`` 를 이 클래스로 바꿔치기해야 한다.
+    ``get_transport`` 가 함수 안에서 임포트하므로 접속 전에 바꾸면 반영된다.
+
+    참고: ``sasl`` 패키지는 C 확장이라 Python 3.11 이상에서는 빌드가 되지 않는다
+    (saslwrapper가 3.11에서 없어진 longintrepr.h 를 참조한다). 대부분의 환경에서는
+    기본값인 puresasl 을 그대로 쓰면 된다.
+    """
+
+    def __init__(self, host: str, username: Any = None, password: Any = None,
+                 service: Any = None) -> None:
+        import sasl  # 없으면 호출부에서 안내 메시지를 낸다
+
+        client = sasl.Client()
+        client.setAttr("host", host)
+        client.setAttr("service", service or "impala")
+        if username is not None:
+            client.setAttr("username", username)
+        if password is not None:
+            client.setAttr("password", password)
+        client.init()
+        self._client = client
+
+    def start(self, mechanism: Any) -> Any:
+        return self._client.start(mechanism)
+
+    def step(self, challenge: Any) -> Any:
+        return self._client.step(challenge)
+
+    def encode(self, incoming: Any) -> Any:
+        return self._client.encode(incoming)
+
+    def decode(self, outgoing: Any) -> Any:
+        return self._client.decode(outgoing)
+
+    def getError(self) -> Any:
+        return self._client.getError()
+
+
+def use_cyrus_sasl() -> None:
+    """impyla가 puresasl 대신 Cyrus SASL을 쓰도록 바꾼다."""
+    if importlib.util.find_spec("sasl") is None:
+        raise ImportError(
+            "--sasl-backend sasl 을 쓰려면 Cyrus SASL 바인딩이 필요합니다.\n"
+            "    pip install sasl        # libsasl2-dev 가 먼저 설치돼 있어야 합니다\n"
+            "  다만 sasl 패키지는 Python 3.11 이상에서는 빌드되지 않습니다.\n"
+            "  (saslwrapper가 3.11에서 없어진 longintrepr.h 를 참조합니다)\n"
+            "  기본값인 --sasl-backend puresasl 을 쓰세요. impyla의 기본 동작입니다."
+        )
+
+    import impala.sasl_compat
+
+    impala.sasl_compat.PureSASLClient = CyrusSASLClient
+
+
 def check_auth_dependencies(auth_mechanism: str) -> None:
     """인증 방식에 필요한 SASL 패키지가 있는지 미리 확인한다.
 
@@ -403,6 +461,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     conn.add_argument("--no-ssl", action="store_true", help="TLS를 끄고 평문으로 접속")
     conn.add_argument(
+        "--sasl-backend",
+        default="puresasl",
+        choices=["puresasl", "sasl"],
+        help="SASL 구현. puresasl(기본, impyla 기본값) 또는 sasl(Cyrus, Python 3.10 이하만)",
+    )
+    conn.add_argument(
+        "--debug",
+        action="store_true",
+        help="SASL 핸드셰이크를 포함한 impyla 디버그 로그 출력",
+    )
+    conn.add_argument(
         "--http-transport",
         action="store_true",
         help="HS2 HTTP 엔드포인트(보통 28000)로 접속. 바이너리로 붙어 EOF가 나면 이걸 켜세요.",
@@ -463,9 +532,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # 지연 임포트: --help는 impyla 없이도 뜬다.
     # impyla가 없거나 impala.py 파일에 가려져 있으면 원인을 짚어 알려준다.
+    if args.debug:
+        # impyla와 thrift_sasl이 핸드셰이크 과정을 DEBUG로 남긴다
+        import logging
+
+        logging.basicConfig(
+            level=logging.DEBUG, stream=sys.stderr, format="%(name)s %(levelname)s %(message)s"
+        )
+
     try:
         dbapi = import_impala_dbapi()
         check_auth_dependencies(args.auth_mechanism)
+        if args.sasl_backend == "sasl" and args.auth_mechanism != NO_AUTH:
+            use_cyrus_sasl()
     except ImportError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 3
@@ -473,9 +552,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     transport = "HTTP" if args.http_transport else "바이너리"
     tls = "평문" if args.no_ssl else "TLS"
     who = f"{args.user}@" if args.auth_mechanism != NO_AUTH else ""
+    # HTTP 전송은 SASL이 아니라 HTTP 기본 인증 헤더를 쓴다
+    sasl = ""
+    if args.auth_mechanism != NO_AUTH and not args.http_transport:
+        sasl = f", SASL {args.auth_mechanism}/{args.sasl_backend}"
     print(
-        f"접속: {who}{args.host}:{args.port} "
-        f"({tls}, {args.auth_mechanism}, {transport} 전송)",
+        f"접속: {who}{args.host}:{args.port} ({tls}, {args.auth_mechanism}, {transport} 전송{sasl})",
         file=sys.stderr,
     )
 

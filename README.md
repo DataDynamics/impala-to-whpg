@@ -303,4 +303,15 @@ python examples/query_to_csv.py ... --auth-mechanism NOSASL
 ```
 
 `impala-shell`로 같은 조건에서 붙어보면 서버 쪽 설정인지 클라이언트 쪽인지 빨리
-구분됩니다.
+구분됩니다. `--debug`를 주면 SASL 핸드셰이크가 어디까지 진행됐는지 로그로 볼 수
+있습니다.
+
+### SASL에 대해
+
+바이너리 전송에서 `--auth-mechanism PLAIN`(기본)은 **SASL PLAIN**으로 동작합니다.
+`NOSASL`만 SASL을 쓰지 않습니다. HTTP 전송은 SASL 대신 HTTP 기본 인증 헤더를 씁니다.
+
+SASL 구현은 impyla가 `puresasl`을 기본으로 씁니다. Cyrus SASL(`sasl` 패키지)을
+쓰려면 `--sasl-backend sasl`을 주면 되지만, **`sasl` 패키지는 Python 3.11 이상에서
+빌드되지 않습니다**(saslwrapper가 3.11에서 없어진 `longintrepr.h`를 참조합니다).
+Python 3.11 이상에서는 기본값인 `puresasl`을 쓰세요.

@@ -7,6 +7,7 @@ import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+import types
 from typing import List
 
 import pytest
@@ -193,6 +194,8 @@ def make_args(**overrides) -> argparse.Namespace:
         no_ssl=False,
         http_transport=False,
         http_path="cliservice",
+        sasl_backend="puresasl",
+        debug=False,
     )
     options.update(overrides)
     return argparse.Namespace(**options)
@@ -256,6 +259,107 @@ def test_gssapi_adds_service_name():
 
 def test_plain_omits_kerberos_service_name():
     assert "kerberos_service_name" not in q.build_connect_kwargs(make_args(), "x")
+
+
+# -- SASL 백엔드 -----------------------------------------------------------------
+
+
+def test_cyrus_sasl_signature_matches_impyla_call():
+    """impyla는 PureSASLClient(host, username=, password=, service=) 로 부른다."""
+    import inspect
+
+    params = inspect.signature(q.CyrusSASLClient.__init__).parameters
+    assert list(params) == ["self", "host", "username", "password", "service"]
+    for optional in ("username", "password", "service"):
+        assert params[optional].default is None
+
+
+def test_cyrus_sasl_delegates_to_client(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def setAttr(self, key, value):
+            calls.append(("setAttr", key, value))
+
+        def init(self):
+            calls.append(("init",))
+
+        def start(self, mechanism):
+            return True, mechanism, b"token"
+
+        def step(self, challenge):
+            return True, b"next"
+
+        def encode(self, incoming):
+            return True, incoming
+
+        def decode(self, outgoing):
+            return True, outgoing
+
+        def getError(self):
+            return "그런 오류"
+
+    fake_module = types.ModuleType("sasl")
+    fake_module.Client = FakeClient
+    monkeypatch.setitem(sys.modules, "sasl", fake_module)
+
+    client = q.CyrusSASLClient("impala.example.com", username="u", password="p", service="impala")
+
+    assert ("setAttr", "host", "impala.example.com") in calls
+    assert ("setAttr", "service", "impala") in calls
+    assert ("setAttr", "username", "u") in calls
+    assert ("setAttr", "password", "p") in calls
+    assert ("init",) in calls
+
+    assert client.start("PLAIN") == (True, "PLAIN", b"token")
+    assert client.step(b"c") == (True, b"next")
+    assert client.encode(b"x") == (True, b"x")
+    assert client.decode(b"y") == (True, b"y")
+    assert client.getError() == "그런 오류"
+
+
+def test_cyrus_sasl_defaults_service_to_impala(monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        def setAttr(self, key, value):
+            seen[key] = value
+
+        def init(self):
+            pass
+
+    fake_module = types.ModuleType("sasl")
+    fake_module.Client = FakeClient
+    monkeypatch.setitem(sys.modules, "sasl", fake_module)
+
+    q.CyrusSASLClient("h")
+    assert seen["service"] == "impala"
+    # 값이 없는 항목은 설정하지 않는다
+    assert "username" not in seen and "password" not in seen
+
+
+def test_use_cyrus_sasl_without_package_explains(monkeypatch):
+    monkeypatch.setattr(q.importlib.util, "find_spec", lambda name: None)
+    with pytest.raises(ImportError) as exc:
+        q.use_cyrus_sasl()
+
+    message = str(exc.value)
+    assert "pip install sasl" in message
+    # 3.11 이상에서 빌드되지 않는다는 점을 알려준다
+    assert "3.11" in message
+    assert "puresasl" in message
+
+
+def test_use_cyrus_sasl_swaps_impyla_client(monkeypatch):
+    sasl_compat = pytest.importorskip("impala.sasl_compat")
+    original = sasl_compat.PureSASLClient
+    monkeypatch.setattr(q.importlib.util, "find_spec", lambda name: object())
+    try:
+        q.use_cyrus_sasl()
+        # impyla의 get_transport가 함수 안에서 임포트하므로 이 교체가 반영된다
+        assert sasl_compat.PureSASLClient is q.CyrusSASLClient
+    finally:
+        sasl_compat.PureSASLClient = original
 
 
 # -- 전송 오류 진단 ---------------------------------------------------------------
@@ -335,12 +439,18 @@ def test_script_has_no_project_dependency():
             modules.add(node.module.split(".")[0])
 
     assert "impala_to_greenplum" not in modules
-    allowed = {
+
+    stdlib = {
         "argparse", "contextlib", "csv", "getpass", "gzip", "importlib",
-        "os", "sys", "time", "typing", "unicodedata",
-        "impala",  # 유일한 외부 의존성
+        "logging", "os", "sys", "time", "typing", "unicodedata",
     }
-    assert modules <= allowed, f"허용되지 않은 의존성: {modules - allowed}"
+    third_party = {
+        "impala",  # 유일한 필수 외부 의존성
+        "sasl",    # 선택: --sasl-backend sasl 일 때만 임포트한다
+    }
+    assert modules <= stdlib | third_party, (
+        f"허용되지 않은 의존성: {modules - stdlib - third_party}"
+    )
 
 
 # -- impyla 임포트 진단 (스크립트 자체 구현) ---------------------------------------
