@@ -1,0 +1,6 @@
+impyla>=0.18.0
+psycopg2-binary>=2.9.5
+PyYAML>=6.0
+# Kerberos 인증을 사용하는 Impala/Hive 환경에서만 필요
+# pure-sasl>=0.6.2
+# thrift-sasl>=0.4.3

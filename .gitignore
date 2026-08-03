@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# 접속 정보가 담긴 실제 설정 파일 (config.example.yaml만 커밋한다)
+config.yaml
+*.local.yaml
+*.log
