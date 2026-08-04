@@ -126,7 +126,7 @@ bin/impala-query --host other-impala.example.com -q "SELECT 1" -o out.csv
 | `-c`, `--config PATH` | 설정 파일 지정 (기본 `conf/config.yaml`) |
 | `--no-config` | 설정 파일을 읽지 않고 명령행 인자만 씁니다 |
 | `--no-progress` | 진행 상황을 출력하지 않습니다 (소요 시간 요약은 그대로) |
-| `--debug` | 도구마다 뜻이 다릅니다 — 아래 각 표 참고 |
+| `--debug` | 도구마다 뜻이 다릅니다 — 아래 각 도구 절 참고 |
 | `-h`, `--help` | 도움말. 인자 없이 실행해도 같습니다 |
 
 ### `bin/impala-query`
@@ -420,8 +420,10 @@ bin/gp-query -f cleanup.sql --var dt=2026-08-01 --dry-run
 | `--schema` | 쿼리 전에 `search_path`로 지정할 스키마. 설정의 `greenplum.schema`. |
 | `--session-sql` | 쿼리 전에 실행할 `SET` 문. 여러 번 지정 가능. |
 | `--dry-run` | 실행 후 항상 롤백합니다. |
-| `--debug` | 템플릿을 채운 뒤 실제로 보내는 SQL을 출력합니다. |
 | `--no-password-prompt` | 비밀번호를 묻지 않습니다. `.pgpass`나 trust 인증을 쓸 때. |
+
+`--debug`는 템플릿을 채운 뒤 실제로 보내는 SQL을 출력합니다. `--config`,
+`--no-config`, `--no-progress`와 함께 [커맨드 사용법](#커맨드-사용법)에도 있습니다.
 
 행이 많으면 앞 100행만 보여주고 멈춥니다. **보여줄 만큼만 받고 끊기 때문에 총
 개수는 알 수 없고 `100행 이상`으로 표시합니다.** 100행을 보려고 수백만 행을
@@ -577,13 +579,14 @@ bin/s3-ops download s3://dw-stage/orders/2026-08-01/ ./out/ --recursive
 | `--session-token` | 임시 자격증명(STS)의 세션 토큰 |
 | `--region` | AWS 리전 |
 | `--endpoint` | S3 호환 스토리지 엔드포인트 (MinIO 등) |
-| `-c`, `--config` | 다른 설정 파일 지정 (기본 `conf/config.yaml`) |
-| `--no-config` | 설정 파일을 읽지 않음 |
-| `--debug` | 오류가 나면 전체 스택 트레이스를 출력 |
+
+여기 있는 것은 S3 접속에만 쓰는 옵션입니다. `--config`, `--no-config`,
+`--no-progress`, `--debug`는 세 스크립트가 공통으로 받으며
+[커맨드 사용법](#커맨드-사용법)에 정리되어 있습니다.
 
 ```bash
 # 버킷을 미리 주면 키만 써도 됩니다
-bin/s3-ops --bucket dw-stage ls impala/
+bin/s3-ops --bucket dw-stage ls orders/
 
 # MinIO 등 S3 호환 스토리지
 bin/s3-ops --endpoint http://minio:9000 --bucket dw-stage \
