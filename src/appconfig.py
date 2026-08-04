@@ -84,8 +84,25 @@ def expand_env(value: str) -> Optional[str]:
     return expanded
 
 
+def resolve_path(value: str, config_path: Path) -> str:
+    """설정 파일에 적힌 상대 경로를 **설정 파일 위치 기준** 으로 푼다.
+
+    작업 디렉터리 기준으로 두면 어디서 실행하느냐에 따라 파일을 못 찾는다.
+    ``conf/config.yaml`` 에 ``ca_cert: impala-ca.pem`` 이라 적으면 언제나
+    ``conf/impala-ca.pem`` 을 가리킨다. 절대 경로는 그대로 둔다.
+    """
+    expanded = os.path.expanduser(value)
+    if os.path.isabs(expanded):
+        return expanded
+    return str((config_path.parent / expanded).resolve())
+
+
 def load_section(
-    path: Optional[Path], section: str, keys: Sequence[str], required: bool = False
+    path: Optional[Path],
+    section: str,
+    keys: Sequence[str],
+    required: bool = False,
+    path_keys: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """설정 파일에서 한 섹션을 읽어 ``keys`` 에 해당하는 값만 돌려준다.
 
@@ -94,6 +111,8 @@ def load_section(
 
     ``required`` 는 그 섹션이 없을 때 오류를 낼지 여부다. ``--config`` 로 파일을
     직접 지정했는데 정작 필요한 섹션이 없다면 오타일 가능성이 높으므로 알린다.
+
+    ``path_keys`` 에 든 키는 파일 경로로 보고 설정 파일 위치 기준으로 푼다.
     """
     empty: Dict[str, Any] = {key: None for key in keys}
     if path is None:
@@ -126,7 +145,11 @@ def load_section(
     settings = dict(empty)
     for key in keys:
         value = body.get(key)
-        settings[key] = expand_env(value) if isinstance(value, str) else value
+        if isinstance(value, str):
+            value = expand_env(value)
+            if value is not None and key in path_keys:
+                value = resolve_path(value, path)
+        settings[key] = value
     return settings
 
 

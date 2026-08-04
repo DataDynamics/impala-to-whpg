@@ -787,6 +787,7 @@ def parsed(tmp_path, body: str, argv: List[str]):
     """설정 파일을 기본 파일 자리에 놓고 인자를 파싱해 병합까지 마친다."""
     path = tmp_path / "config.yaml"
     path.write_text(body, encoding="utf-8")
+    (tmp_path / "impala-ca.pem").write_text("-----BEGIN CERTIFICATE-----", encoding="utf-8")
     original = q.appconfig.DEFAULT_CONFIG
     q.appconfig.DEFAULT_CONFIG = path
     try:
@@ -806,7 +807,7 @@ impala:
   user: config-user
   auth_mechanism: PLAIN
   use_ssl: true
-  ca_cert: /etc/ssl/ca.pem
+  ca_cert: impala-ca.pem
   session_settings:
     MEM_LIMIT: 8g
 """
@@ -818,7 +819,8 @@ def test_config_fills_connection_arguments(tmp_path):
     assert args.port == 21051
     assert args.database == "sales"
     assert args.user == "config-user"
-    assert args.ca_cert == "/etc/ssl/ca.pem"
+    # 상대 경로는 설정 파일이 있는 디렉터리 기준으로 풀린다
+    assert args.ca_cert == str(tmp_path / "impala-ca.pem")
     assert args.no_ssl is False
 
 
@@ -871,6 +873,41 @@ def test_missing_user_is_reported(tmp_path):
 def test_nosasl_does_not_need_a_user(tmp_path):
     args = parsed(tmp_path, "impala:\n  host: h\n", ["--auth-mechanism", "NOSASL"])
     assert args.user is None
+
+
+def test_absolute_ca_cert_is_left_alone(tmp_path):
+    cert = tmp_path / "elsewhere.pem"
+    cert.write_text("x", encoding="utf-8")
+    args = parsed(tmp_path, f"impala:\n  host: h\n  user: u\n  ca_cert: {cert}\n", [])
+    assert args.ca_cert == str(cert)
+
+
+def test_ca_cert_is_resolved_from_config_dir_not_cwd(tmp_path, monkeypatch):
+    """작업 디렉터리를 바꿔도 같은 인증서를 가리켜야 한다."""
+    monkeypatch.chdir(tmp_path.parent)
+    args = parsed(tmp_path, "impala:\n  host: h\n  user: u\n  ca_cert: impala-ca.pem\n", [])
+    assert args.ca_cert == str(tmp_path / "impala-ca.pem")
+
+
+def test_missing_ca_cert_is_reported(tmp_path):
+    with pytest.raises(SystemExit):
+        parsed(tmp_path, "impala:\n  host: h\n  user: u\n  ca_cert: 없는인증서.pem\n", [])
+
+
+def test_missing_ca_cert_is_ignored_without_tls(tmp_path):
+    """--no-ssl 이면 인증서를 쓰지 않으므로 없어도 상관없다."""
+    args = parsed(
+        tmp_path, "impala:\n  host: h\n  user: u\n  ca_cert: 없는인증서.pem\n", ["--no-ssl"]
+    )
+    assert args.no_ssl is True
+
+
+def test_command_line_ca_cert_is_used_as_given(tmp_path):
+    """명령행 경로는 작업 디렉터리 기준이라 그대로 쓴다."""
+    cert = tmp_path / "cli.pem"
+    cert.write_text("x", encoding="utf-8")
+    args = parsed(tmp_path, CONFIG, ["--ca-cert", str(cert)])
+    assert args.ca_cert == str(cert)
 
 
 def test_shipped_default_config_has_an_impala_section(tmp_path):

@@ -141,6 +141,7 @@ conf/
   config.yaml           # 기본으로 읽는 설정 파일
   config.example.yaml   # 모든 옵션을 주석과 함께 나열한 참조 문서
   config.local.yaml     # --config 로 지정해 쓰는 로컬 값 (.gitignore 대상)
+  impala-ca.pem         # Impala TLS 검증용 CA 인증서
 ```
 
 ## S3 파일 다루기
@@ -213,6 +214,8 @@ pip install impyla pure-sasl thrift-sasl PyYAML
 export IMPALA_USER='etl_user'
 export IMPALA_PASSWORD='...'
 
+cp /경로/impala-ca.pem conf/impala-ca.pem   # 설정의 impala.ca_cert 가 가리키는 위치
+
 bin/query-to-csv \
     --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
     --output orders.csv
@@ -245,8 +248,14 @@ orders.csv  182.4MB  1,240,331행
 - 비밀번호는 `--password` 같은 인자로 받지 않습니다. `ps`로 다른 사용자에게 노출되기
   때문에 설정 파일(`impala.password`, 보통 `${IMPALA_PASSWORD}` 참조), 환경변수,
   대화형 입력 순으로만 받습니다.
-- `--ca-cert`를 주지 않으면 통신은 암호화되지만 서버 인증서를 검증하지 않습니다.
-  운영 환경에서는 CA 인증서 경로를 지정하세요.
+- CA 인증서는 `conf/impala-ca.pem`을 씁니다. 설정의 `impala.ca_cert`에 적은 상대
+  경로는 **작업 디렉터리가 아니라 설정 파일이 있는 `conf/` 기준**으로 풀리므로,
+  어느 디렉터리에서 실행해도 같은 파일을 가리킵니다. 절대 경로도 그대로 쓸 수
+  있습니다.
+- 인증서가 그 경로에 없으면 접속을 시도하기 전에 경로를 짚어 알려줍니다. 조용히
+  넘어가면 검증 없이 접속하게 되기 때문입니다. 검증이 필요 없다면
+  `impala.ca_cert`를 비우세요. 그러면 통신은 암호화되지만 서버 인증서는 확인하지
+  않습니다.
 - 엑셀에서 한글이 깨지면 `--encoding utf-8-sig`를 쓰세요.
 - 그 밖에 `--gzip`, `--null-string`, `--query-file`, `--set KEY=VALUE`를 지원합니다.
   자세한 건 `--help`를 보세요.

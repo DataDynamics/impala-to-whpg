@@ -22,6 +22,10 @@ impala:
   # user: ${IMPALA_USER}
   # password: ${IMPALA_PASSWORD}
   # use_ssl: true
+  #
+  # ca_cert 의 상대 경로는 이 파일이 있는 conf/ 기준으로 푼다. 작업 디렉터리가
+  # 아니므로 어디서 실행해도 같은 파일을 가리킨다. 절대 경로도 그대로 쓸 수 있다.
+  # ca_cert: impala-ca.pem                     # → conf/impala-ca.pem
   # ca_cert: /etc/ssl/certs/impala-ca.pem      # 생략 시 인증서 검증 안 함
 
   # Kerberos라면

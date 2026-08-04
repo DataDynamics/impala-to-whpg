@@ -522,6 +522,9 @@ IMPALA_SETTINGS = (
     "session_settings",
 )
 
+#: 파일 경로로 다루는 키. 상대 경로는 설정 파일 위치를 기준으로 푼다.
+IMPALA_PATH_SETTINGS = ("ca_cert",)
+
 
 def load_impala_settings(args: argparse.Namespace) -> Dict[str, Any]:
     """설정 파일의 impala 섹션을 읽는다.
@@ -532,7 +535,11 @@ def load_impala_settings(args: argparse.Namespace) -> Dict[str, Any]:
     """
     path = appconfig.resolve_config_path(args)
     return appconfig.load_section(
-        path, "impala", IMPALA_SETTINGS, required=bool(args.config)
+        path,
+        "impala",
+        IMPALA_SETTINGS,
+        required=bool(args.config),
+        path_keys=IMPALA_PATH_SETTINGS,
     )
 
 
@@ -574,6 +581,15 @@ def apply_config(
         parser.error("사용자를 알 수 없습니다. -u/--user 를 주거나 설정의 impala.user 를 채우세요.")
     if not args.host:
         parser.error("호스트를 알 수 없습니다. --host 를 주거나 설정의 impala.host 를 채우세요.")
+
+    # 없는 인증서를 그대로 넘기면 impyla가 알아보기 어려운 SSL 오류를 낸다.
+    # 조용히 무시하면 검증 없이 접속하게 되므로, 여기서 경로를 짚어 알린다.
+    if args.ca_cert and not args.no_ssl and not os.path.isfile(args.ca_cert):
+        parser.error(
+            f"CA 인증서를 찾을 수 없습니다: {args.ca_cert}\n"
+            "  설정의 impala.ca_cert 경로를 고치거나, 그 위치에 인증서를 두세요.\n"
+            "  인증서 검증 없이 접속하려면 impala.ca_cert 를 비우세요."
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
