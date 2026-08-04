@@ -283,14 +283,16 @@ class Shell:
         rendered = sqlfile.render_query(sql, self.variables, "입력", warn_unused=False)
         self.run_sql(rendered)
 
-    def run_sql(self, sql: str) -> None:
+    def run_sql(self, sql: str) -> Optional[int]:
+        """문장을 실행한다. 결과가 있으면 보여준 행 수를 돌려준다."""
         timer = PhaseTimer(("실행 요청", "결과 출력"))
+        shown: Optional[int] = None
         cursor = self.conn.cursor()
         try:
             with timer.measure("실행 요청"):
                 outcome = self._run_cancellable(cursor, sql)
             if outcome is None:
-                return                                  # 사용자가 취소했다
+                return None                             # 사용자가 취소했다
 
             columns, rows, truncated, affected = outcome
             if columns is None:
@@ -299,6 +301,7 @@ class Shell:
                 )
                 print(detail, file=sys.stderr)
             else:
+                shown = len(rows)
                 with timer.measure("결과 출력"):
                     self._emit(columns, rows, truncated)
         finally:
@@ -306,6 +309,7 @@ class Shell:
 
         if self.timing:
             timer.print_report()
+        return shown
 
     def _run_cancellable(self, cursor: Any, sql: str) -> Optional[Tuple[Any, Any, bool, int]]:
         """문장을 별도 스레드에서 돌려 Ctrl-C 로 취소할 수 있게 한다.
@@ -535,10 +539,24 @@ class Shell:
             self._names = None          # 목록을 다시 받으니 자동완성 캐시도 비운다
         print(f"-- {label}", file=sys.stderr)
         try:
-            self.run_sql(maker(target))
-            # 분산키처럼 컬럼 목록에 안 들어가는 정보를 뒤에 덧붙인다
+            shown = self.run_sql(maker(target))
+            if shown == 0:
+                # 빈 표만 내면 없는 것인지 잘못 친 것인지 알 수 없다
+                if name == "\\d" and target:
+                    print(
+                        f"{target} 을(를) 찾지 못했습니다. 스키마를 붙였는지, "
+                        "이름 대소문자가 맞는지 확인하세요(\\dt 로 목록을 봅니다).",
+                        file=sys.stderr,
+                    )
+                else:
+                    print("테이블이 없습니다.", file=sys.stderr)
+                return
+            # 분산키처럼 컬럼 목록에 안 들어가는 정보를 뒤에 덧붙인다.
+            # 엔진이 None 을 주면 그 서버에는 보여줄 것이 없다는 뜻이다.
             if name == "\\d" and target and self.engine.describe_extra_sql is not None:
-                self.run_text_sql(self.engine.describe_extra_sql(target))
+                extra = self.engine.describe_extra_sql(target)
+                if extra:
+                    self.run_text_sql(extra)
         except Exception as exc:
             print(f"오류: {type(exc).__name__}: {exc}", file=sys.stderr)
             self._recover()

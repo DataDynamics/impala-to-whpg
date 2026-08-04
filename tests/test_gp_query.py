@@ -492,3 +492,100 @@ def test_shipped_greenplum_template_renders():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# -- Greenplum 전용 기능 폴백 -------------------------------------------------------
+
+
+def engine_for(has_distributed: bool):
+    """probe 를 거친 엔진을 만든다. Greenplum 인지 그냥 PostgreSQL 인지 흉내낸다."""
+
+    class Cur:
+        def __init__(self) -> None:
+            self._row = None
+
+        def execute(self, sql):
+            assert "pg_get_table_distributedby" in sql
+            self._row = (1,) if has_distributed else None
+
+        def fetchone(self):
+            return self._row
+
+        def close(self):
+            pass
+
+    class Conn:
+        autocommit = False
+
+        def cursor(self):
+            return Cur()
+
+    args = argparse.Namespace(
+        database="dw", schema=None, session_sql=[], host="h", port=5432,
+        user="u", sslmode=None, timeout=None,
+    )
+    engine = g.make_engine(args, None, None)
+    engine._enable_autocommit(Conn())
+    return engine
+
+
+def test_distribution_key_is_probed_not_assumed():
+    """붙어보기 전에는 Greenplum 인지 알 수 없다."""
+    assert engine_for(True).describe_extra_sql("orders")
+    assert engine_for(False).describe_extra_sql("orders") is None
+
+
+def test_ddl_omits_distribution_on_plain_postgresql():
+    """없는 함수는 CASE 안에 있어도 해석 단계에서 걸린다. 아예 넣지 않아야 한다."""
+    sql = engine_for(False).ddl_sql("staging.orders")
+    assert "pg_get_table_distributedby" not in sql
+    assert "CREATE TABLE" in sql and "reloptions" in sql
+
+
+def test_ddl_includes_distribution_on_greenplum():
+    assert "pg_get_table_distributedby" in engine_for(True).ddl_sql("staging.orders")
+
+
+def test_probe_failure_falls_back_to_postgresql():
+    class Failing:
+        autocommit = False
+
+        def cursor(self):
+            class Cur:
+                def execute(self, sql):
+                    raise RuntimeError("권한 없음")
+
+                def close(self):
+                    pass
+
+            return Cur()
+
+    args = argparse.Namespace(
+        database="dw", schema=None, session_sql=[], host="h", port=5432,
+        user="u", sslmode=None, timeout=None,
+    )
+    engine = g.make_engine(args, None, None)
+    engine._enable_autocommit(Failing())
+    assert engine.describe_extra_sql("orders") is None
+
+
+def test_ddl_sql_is_not_broken_by_python_escapes():
+    """E'\\n' 이 파이썬에서 해석되면 서버로 실제 개행이 넘어간다."""
+    sql = engine_for(True).ddl_sql("staging.orders")
+    assert r"E'\n'" in sql or "E'\\n'" in sql
+
+
+def test_describe_uses_pg_catalog_not_information_schema():
+    """information_schema 는 권한 있는 테이블만 보여준다. 조용히 비면 원인을 알 수 없다."""
+    sql = engine_for(False).describe_sql("public.argus_users")
+    assert "information_schema" not in sql
+    assert "pg_attribute" in sql and "pg_namespace" in sql
+    assert "format_type" in sql              # varchar(50) 을 그대로 보여준다
+    assert "n.nspname = 'public'" in sql
+    assert "c.relname = 'argus_users'" in sql
+
+
+def test_describe_without_a_schema_matches_any():
+    sql = engine_for(False).describe_sql("argus_users")
+    assert "c.relname = 'argus_users'" in sql
+    assert "nspname" not in sql.split("WHERE")[1]

@@ -996,6 +996,52 @@ def test_describe_adds_extra_info(capsys):
     assert "분산키" in capsys.readouterr().out
 
 
+def test_describe_explains_an_empty_result(capsys):
+    """빈 표만 내면 없는 것인지 잘못 친 것인지 알 수 없다."""
+    s, conn = make_shell()
+    conn.result = (["번호", "컬럼"], [], -1)
+    s.feed("\\d public.argus_users")
+    err = capsys.readouterr().err
+    assert "찾지 못했습니다" in err
+    assert "\\dt" in err
+
+
+def test_describe_skips_extra_when_the_table_is_missing():
+    """없는 테이블에 추가 조회까지 붙일 이유가 없다."""
+    s, conn = make_shell()
+    conn.result = (["번호"], [], -1)
+    s.feed("\\d nope")
+    assert conn.executed == ["DESCRIBE nope"]
+
+
+def test_dt_explains_an_empty_result(capsys):
+    s, conn = make_shell()
+    conn.result = (["name"], [], -1)
+    s.feed("\\dt")
+    assert "테이블이 없습니다" in capsys.readouterr().err
+
+
+def test_run_sql_returns_the_row_count():
+    s, conn = make_shell()
+    conn.result = (["a"], [(1,), (2,)], -1)
+    assert s.run_sql("SELECT 1") == 2
+    conn.result = ([], [], 5)
+    assert s.run_sql("DELETE FROM t") is None      # 결과가 없는 문장
+
+
+def test_describe_skips_extra_when_engine_returns_none():
+    """엔진이 None 을 주면 그 서버에는 보여줄 것이 없다는 뜻이다."""
+    conn = FakeConnection()
+    engine = sh.Engine("Greenplum", "dw", lambda: conn,
+                       describe_sql=lambda t: f"DESCRIBE {t}",
+                       describe_extra_sql=lambda t: None)
+    s = sh.Shell(engine, argparse.Namespace(var=[], max_rows=100, sql_dir=None))
+    s.conn = conn
+    s.interactive = False
+    s.feed("\\d orders")
+    assert conn.executed == ["DESCRIBE orders"]
+
+
 def test_describe_without_extra_support():
     conn = FakeConnection()
     engine = sh.Engine("Impala", "x", lambda: conn,

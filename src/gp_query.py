@@ -250,11 +250,33 @@ def quote_literal(value: str) -> str:
 def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]) -> "shell.Engine":
     """대화형 셸이 쓸 엔진 어댑터. 접속 인자는 기존 것을 그대로 재사용한다."""
 
+    # 붙어보기 전에는 상대가 Greenplum 인지 그냥 PostgreSQL 인지 알 수 없다.
+    # 접속할 때 한 번 확인해두고 카탈로그 조회 SQL 을 다르게 만든다.
+    capability = {"distributed_by": False}
+
     def connect() -> Any:
         return psycopg2.connect(**build_connect_kwargs(args, password))
 
+    def probe(conn: Any) -> None:
+        """Greenplum 전용 함수가 있는지 본다.
+
+        CASE 로 감싸도 소용없다. 없는 함수는 실행 전 해석 단계에서 걸리므로,
+        분기에 넣어두기만 해도 문장 전체가 실패한다. SQL 을 만들기 전에 알아야 한다.
+        """
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT 1 FROM pg_proc WHERE proname = 'pg_get_table_distributedby' LIMIT 1"
+            )
+            capability["distributed_by"] = cursor.fetchone() is not None
+        except Exception:
+            capability["distributed_by"] = False
+        finally:
+            cursor.close()
+
     def enable_autocommit(conn: Any) -> None:
         conn.autocommit = True
+        probe(conn)
         if args.schema:
             cursor = conn.cursor()
             try:
@@ -277,15 +299,37 @@ def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]
             f"FROM pg_catalog.pg_tables {where} ORDER BY 1, 2"
         )
 
-    def describe_sql(target: str) -> str:
+    def _target_where(target: str, alias: str = "c") -> str:
+        """``schema.table`` 을 카탈로그 조회 조건으로 바꾼다."""
         schema, _, name = target.rpartition(".")
-        where = f"WHERE table_name = {quote_literal(name)}"
+        where = f"{alias}.relname = {quote_literal(name)}"
         if schema:
-            where += f" AND table_schema = {quote_literal(schema)}"
-        return (
-            "SELECT column_name, data_type, is_nullable, column_default "
-            f"FROM information_schema.columns {where} ORDER BY ordinal_position"
-        )
+            where += f" AND n.nspname = {quote_literal(schema)}"
+        return where
+
+    def describe_sql(target: str) -> str:
+        """컬럼 정보를 pg_catalog 에서 읽는다.
+
+        information_schema 를 쓰면 **현재 사용자가 권한을 가진 테이블만** 보인다.
+        남의 스키마를 들여다볼 때 결과가 조용히 비어서, 테이블이 없는 것인지
+        권한이 없는 것인지 구분할 수 없다. psql 의 \\d 도 pg_catalog 를 쓴다.
+
+        타입도 이쪽이 낫다. information_schema 는 varchar(50) 을 'character
+        varying' 과 길이 컬럼으로 쪼개 놓지만, format_type 은 그대로 돌려준다.
+        """
+        return f"""
+SELECT a.attnum                                        AS "번호",
+       a.attname                                       AS "컬럼",
+       format_type(a.atttypid, a.atttypmod)            AS "타입",
+       CASE WHEN a.attnotnull THEN 'NOT NULL' ELSE '' END AS "NULL",
+       coalesce(pg_get_expr(ad.adbin, ad.adrelid), '') AS "기본값"
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+  LEFT JOIN pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
+ WHERE {_target_where(target)}
+ ORDER BY a.attnum
+""".strip()
 
     def table_names_sql() -> str:
         # 자동완성용. 스키마를 붙인 이름과 안 붙인 이름을 모두 준다.
@@ -298,16 +342,11 @@ def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]
             "ORDER BY 1"
         )
 
-    def _target_where(target: str, alias: str = "c") -> str:
-        """``schema.table`` 을 카탈로그 조회 조건으로 바꾼다."""
-        schema, _, name = target.rpartition(".")
-        where = f"{alias}.relname = {quote_literal(name)}"
-        if schema:
-            where += f" AND n.nspname = {quote_literal(schema)}"
-        return where
-
-    def describe_extra_sql(target: str) -> str:
+    def describe_extra_sql(target: str) -> Optional[str]:
         # 분산키는 컬럼 목록에 안 나온다. Greenplum 에서 가장 먼저 확인할 값이다.
+        # 그냥 PostgreSQL 이면 분산키 자체가 없으므로 보여줄 것도 없다.
+        if not capability["distributed_by"]:
+            return None
         return (
             "SELECT '분산키: ' || pg_get_table_distributedby(c.oid) "
             "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -322,7 +361,14 @@ def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]
 
         제약조건·인덱스·파티션은 넣지 않는다. 그것까지 정확히 뽑으려면 pg_dump 를
         쓰는 편이 낫고, 어설프게 흉내내면 맞는 줄 알고 쓰다가 어긋난다.
+
+        분산키는 Greenplum 에만 있다. 그냥 PostgreSQL 이면 그 줄을 빼고 만든다.
         """
+        distributed = (
+            "|| E'\\n' || pg_get_table_distributedby(c.oid) "
+            if capability["distributed_by"]
+            else ""
+        )
         # 원시 문자열이어야 E'\n' 이 파이썬이 아니라 서버에서 해석된다
         return rf"""
 SELECT 'CREATE TABLE ' || n.nspname || '.' || c.relname || E' (\n'
@@ -335,7 +381,7 @@ SELECT 'CREATE TABLE ' || n.nspname || '.' || c.relname || E' (\n'
     || E'\n)'
     || CASE WHEN c.reloptions IS NOT NULL
             THEN E'\nWITH (' || array_to_string(c.reloptions, ', ') || ')' ELSE '' END
-    || E'\n' || pg_get_table_distributedby(c.oid) || ';'
+    {distributed}|| ';'
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
   JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
