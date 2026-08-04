@@ -36,6 +36,7 @@ pip install -r requirements.txt
 | `impala-query` | `impyla`, `PyYAML`, `Jinja2` (+ LDAP/Kerberos 인증 시 `pure-sasl`, `thrift-sasl`) |
 | `gp-query` | `psycopg2-binary`, `PyYAML`, `Jinja2` |
 | `s3-ops` | `boto3`, `PyYAML` |
+| `impala-shell` / `gp-shell` | 각각 `impala-query` / `gp-query` 와 같습니다 |
 
 `pure-sasl`, `thrift-sasl`은 **LDAP(PLAIN)과 Kerberos(GSSAPI) 인증 모두에 필요합니다.**
 impyla는 `auth_mechanism`이 `NOSASL`이 아니면 접속하는 순간 이 둘을 불러옵니다.
@@ -72,6 +73,9 @@ bin/gp-query -f order_summary.sql --var dt=2026-08-01
 
 # 버킷도 설정에서 옵니다
 bin/s3-ops ls orders/
+
+# 붙어서 주고받으려면
+bin/gp-shell
 ```
 
 경로는 스크립트 위치를 기준으로 잡으므로 **어느 디렉터리에서 실행해도 같은 파일**을
@@ -363,6 +367,10 @@ python -m pytest tests/ -v
 가짜 커서와 가짜 S3 클라이언트로 CSV 인코딩, 구분자 처리, 템플릿 변수, 표 정렬,
 페이지네이션, 삭제 안전장치, 트랜잭션 커밋/롤백, 자격증명 우선순위, 크론 대응을
 검증하므로 실제 Impala/Greenplum/S3 없이도 실행됩니다.
+
+셸은 문장 분리(따옴표·주석·`$$` 안의 세미콜론), 메타 명령, 자동완성, 페이저 판단,
+`Ctrl-C` 취소까지 덮습니다. 취소는 실행이 매달린 상태를 만들어 실제 흐름을
+재현합니다.
 
 `bin/` 래퍼는 `LANG` 없이 `PATH`를 좁힌 채 무관한 디렉터리에서 실제로 실행해
 확인합니다.
