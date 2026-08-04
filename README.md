@@ -26,7 +26,7 @@ bin/s3-ops
 pip install -r requirements.txt
 ```
 
-두 도구가 필요로 하는 것이 다릅니다. 쓰지 않는 쪽은 설치하지 않아도 됩니다.
+도구마다 필요한 것이 다릅니다. 쓰지 않는 쪽은 설치하지 않아도 됩니다.
 
 | 도구 | 필요한 패키지 |
 | --- | --- |
@@ -197,13 +197,14 @@ PYTHON=/opt/python3.11/bin/python3
 
 종료 코드로 실패를 판별할 수 있습니다.
 
-| 코드 | 뜻 |
-| --- | --- |
-| `0` | 성공 |
-| `2` | 인자가 잘못됨 (argparse) |
-| `3` | 필요한 파이썬 패키지 없음 |
-| `4` | 접속 실패 |
-| `5` | 쿼리·명령 실행 실패 |
+| 코드 | 뜻 | 쓰는 스크립트 |
+| --- | --- | --- |
+| `0` | 성공 | 전부 |
+| `1` | 대상이 없거나 사용자가 취소함 | `s3-ops` |
+| `2` | 인자가 잘못됨 (argparse) | 전부 |
+| `3` | 필요한 파이썬 패키지 없음 | `impala-query`, `gp-query` |
+| `4` | 접속 실패 | `impala-query`, `gp-query` |
+| `5` | 쿼리·명령 실행 실패 | 전부 |
 
 ## 문서
 
@@ -222,9 +223,12 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-가짜 커서와 가짜 S3 클라이언트로 CSV 인코딩, 구분자 처리, 템플릿 변수, 페이지네이션,
-삭제 안전장치, 트랜잭션 커밋/롤백, 자격증명 우선순위를 검증하므로 실제
-Impala/Greenplum/S3 없이도 실행됩니다.
+가짜 커서와 가짜 S3 클라이언트로 CSV 인코딩, 구분자 처리, 템플릿 변수, 표 정렬,
+페이지네이션, 삭제 안전장치, 트랜잭션 커밋/롤백, 자격증명 우선순위, 크론 대응을
+검증하므로 실제 Impala/Greenplum/S3 없이도 실행됩니다.
+
+`bin/` 래퍼는 `LANG` 없이 `PATH`를 좁힌 채 무관한 디렉터리에서 실제로 실행해
+확인합니다.
 
 ## 프로젝트 구조
 
@@ -253,7 +257,7 @@ conf/
   config.yaml          # 기본으로 읽는 설정 파일 (sql.dir 로 위 경로를 바꿀 수 있음)
   config.example.yaml  # 모든 옵션을 주석과 함께 나열한 참조 문서
   config.local.yaml    # --config 로 지정해 쓰는 로컬 값 (.gitignore 대상)
-  impala-ca.pem        # Impala TLS 검증용 CA 인증서
+  impala-ca.pem        # Impala TLS 검증용 CA 인증서 (직접 넣어야 함)
 ```
 
 ## Greenplum에 SQL 실행하기
@@ -279,7 +283,19 @@ order_dt   | status   | order_cnt | amount_sum
 -----------+----------+-----------+-----------
 2026-08-01 | 결제완료 | 12        | 10.50
 2026-08-01 | 취소     | NULL      | NULL
-2행, 0.03초
+```
+
+표는 stdout으로, 행 수와 소요 시간은 stderr로 나갑니다.
+
+```
+2행
+
+=== 구간별 소요 시간 ===
+  1. Greenplum 접속     0.081초   28.5%
+  2. 쿼리 실행 요청     0.163초   57.4%
+  3. 결과 수신          0.031초   10.9%
+  ─────────────────────────────────
+     합계              0.284초  100.0%
 ```
 
 ### 트랜잭션
@@ -292,7 +308,7 @@ order_dt   | status   | order_cnt | amount_sum
 
 ```bash
 bin/gp-query -f cleanup.sql --var dt=2026-08-01 --dry-run
-# 1,204행, 0.31초
+# 1,204행
 # --dry-run 이므로 롤백했습니다. 반영되지 않았습니다.
 ```
 
@@ -378,13 +394,6 @@ bin/s3-ops --endpoint http://minio:9000 --bucket dw-stage \
 `src/impala_query.py`가 TLS + LDAP 접속으로 조회해 **`-o`가 없으면 표로, 있으면
 CSV 파일로** 내보냅니다. 어느 구간에 시간을 썼는지도 함께 보여줍니다.
 
-```bash
-bin/impala-query -f daily_orders.sql -V dt=2026-08-01          # 표로 확인
-bin/impala-query -f daily_orders.sql -V dt=2026-08-01 -o out.csv  # 파일로 저장
-```
-
-`gp-query`와 같은 규칙입니다. 표는 기본 100행까지 보여주고 `--max-rows`로 조절합니다.
-
 접속 정보는 `conf/config.yaml`의 `impala` 섹션에서, 쿼리는 `sql/`의 `.sql` 템플릿에서
 옵니다. `--host`, `-u/--user`, `--ca-cert`, `--auth-mechanism` 등으로 개별 값만 덮어쓸
 수 있고, `--no-config`를 주면 설정을 아예 무시하고 명령행 인자만 씁니다.
@@ -396,12 +405,11 @@ export IMPALA_PASSWORD='...'
 
 cp /경로/impala-ca.pem conf/impala-ca.pem   # 설정의 impala.ca_cert 가 가리키는 위치
 
-bin/impala-query \
-    --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
-    --output orders.csv
+# 표로 확인
+bin/impala-query -f daily_orders.sql -V dt=2026-08-01
 
-# sql/ 의 템플릿에 변수를 채워 실행
-bin/impala-query -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
+# CSV 파일로 저장
+bin/impala-query -f daily_orders.sql -V dt=2026-08-01 -o orders.csv.gz --gzip
 
 # 설정 없이 전부 명령행으로
 bin/impala-query --no-config \
@@ -409,6 +417,9 @@ bin/impala-query --no-config \
     --ca-cert /etc/ssl/certs/impala-ca.pem \
     -q "SELECT 1" -o out.csv
 ```
+
+**`gp-query`와 같은 규칙입니다.** 표는 기본 100행까지 보여주고 `--max-rows`로
+조절하며, 보여줄 만큼만 받고 멈추므로 총 개수 대신 `100행 이상`으로 표시합니다.
 
 ```
 === 구간별 소요 시간 ===
@@ -441,7 +452,8 @@ orders.csv  182.4MB  1,240,331행
   않습니다.
 - 엑셀에서 한글이 깨지면 `--encoding utf-8-sig`를 쓰세요.
 - 그 밖에 `--gzip`, `--null-string`, `--query-file`, `--var KEY=VALUE`,
-  `--set KEY=VALUE`, `--no-progress`를 지원합니다. 자세한 건 `--help`를 보세요.
+  `--set KEY=VALUE`, `--max-rows`, `--no-progress`를 지원합니다. 자세한 건
+  `--help`를 보세요.
 
 ### 구분자와 따옴표
 
