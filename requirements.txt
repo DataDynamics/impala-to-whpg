@@ -16,6 +16,9 @@ boto3>=1.26.0
 # --no-config 로만 쓴다면 없어도 된다.
 PyYAML>=6.0
 
+# gp-query 에 필요하다.
+psycopg2-binary>=2.9.5
+
 # sql/ 의 .sql 템플릿에 변수를 채울 때 필요하다.
 # {{ }} 나 {% %} 가 없는 평범한 SQL만 쓴다면 없어도 된다.
 Jinja2>=3.0

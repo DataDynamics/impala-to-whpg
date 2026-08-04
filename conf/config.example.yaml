@@ -35,7 +35,25 @@ impala:
   session_settings:
     MEM_LIMIT: 8g
 
-# bin/query-to-csv 가 --query-file 에 이름만 줬을 때 .sql 을 찾는 곳.
+# bin/gp-query 가 접속할 Greenplum.
+greenplum:
+  host: greenplum.example.com
+  port: 5432
+  database: dw
+  user: ${GP_USER:-etl}
+  password: ${GP_PASSWORD}
+
+  # 쿼리 전에 search_path 로 지정할 스키마. --schema 로 덮어쓸 수 있다.
+  schema: staging
+
+  # sslmode: require            # libpq 값 그대로 (require, verify-full 등)
+  # connect_timeout: 10
+
+  # 쿼리 전에 실행할 SET 문. --session-sql 로 더 붙일 수 있다.
+  session_sql:
+    - SET statement_timeout = '30min'
+
+# bin/query-to-csv 와 bin/gp-query 가 --query-file 에 이름만 줬을 때 .sql 을 찾는 곳.
 # 명령행 --sql-dir 로 덮어쓸 수 있다. 적지 않으면 저장소의 sql/ 을 쓴다.
 #
 # 상대 경로는 이 파일이 있는 디렉터리 기준으로 푼다. 작업 디렉터리가 아니므로

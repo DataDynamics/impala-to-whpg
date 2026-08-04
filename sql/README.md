@@ -1,11 +1,15 @@
 # sql/
 
-`bin/query-to-csv` 가 `--query-file` 로 읽는 `.sql` 파일을 모아두는 곳입니다.
-파일 이름만 주면 여기서 찾습니다.
+`bin/query-to-csv` 와 `bin/gp-query` 가 `--query-file` 로 읽는 `.sql` 파일을 모아두는
+곳입니다. 파일 이름만 주면 여기서 찾습니다.
 
 ```bash
-bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
+bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv   # Impala
+bin/gp-query     -f order_summary.sql --var dt=2026-08-01                # Greenplum
 ```
+
+두 도구가 같은 규칙으로 읽습니다. 다만 SQL 방언은 서로 달라서, 한 파일이 양쪽에서
+다 도는 것은 아닙니다. 어느 쪽을 위한 쿼리인지 파일 첫 줄 주석에 적어두면 좋습니다.
 
 다른 디렉터리를 쓰려면 `conf/config.yaml` 의 `sql.dir` 을 바꾸거나 `--sql-dir` 로
 그때만 지정합니다. 설정에 적은 상대 경로는 설정 파일이 있는 `conf/` 기준입니다.

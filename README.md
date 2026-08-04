@@ -1,10 +1,11 @@
 # impala-to-whpg
 
-Impala 조회와 S3 조작을 위한 명령행 도구 모음입니다.
+Impala 조회, Greenplum 실행, S3 조작을 위한 명령행 도구 모음입니다.
 
 | 도구 | 하는 일 |
 | --- | --- |
 | `bin/query-to-csv` | Impala에서 쿼리를 실행해 CSV로 저장하고 구간별 소요 시간을 보여줍니다. |
+| `bin/gp-query` | Greenplum에 SQL을 실행하고 결과를 표나 CSV로 보여줍니다. |
 | `bin/s3-ops` | S3 업로드·삭제·디렉터리 생성/삭제·목록. |
 
 pip로 설치하지 않고 저장소에서 바로 실행합니다. `bin/` 아래 스크립트가 소스 위치를
@@ -15,6 +16,7 @@ pip로 설치하지 않고 저장소에서 바로 실행합니다. `bin/` 아래
 
 ```bash
 bin/query-to-csv
+bin/gp-query
 bin/s3-ops
 ```
 
@@ -29,6 +31,7 @@ pip install -r requirements.txt
 | 도구 | 필요한 패키지 |
 | --- | --- |
 | `query-to-csv` | `impyla`, `PyYAML`, `Jinja2` (+ LDAP/Kerberos 인증 시 `pure-sasl`, `thrift-sasl`) |
+| `gp-query` | `psycopg2-binary`, `PyYAML`, `Jinja2` |
 | `s3-ops` | `boto3`, `PyYAML` |
 
 `pure-sasl`, `thrift-sasl`은 **LDAP(PLAIN)과 Kerberos(GSSAPI) 인증 모두에 필요합니다.**
@@ -61,6 +64,9 @@ export AWS_SECRET_ACCESS_KEY='...'
 # 접속 정보는 설정에서, 쿼리는 sql/ 에서 오므로 변수와 출력 경로만 주면 됩니다
 bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 --output orders.csv
 
+# Greenplum에 실행. 결과가 있으면 표로 보여줍니다.
+bin/gp-query -f order_summary.sql --var dt=2026-08-01
+
 # 버킷도 설정에서 옵니다
 bin/s3-ops ls orders/
 ```
@@ -84,7 +90,8 @@ bin/query-to-csv --host other-impala.example.com -q "SELECT 1" -o out.csv
 ```
 
 설정 파일에도 명령행에도 없는 값은 기본값으로 떨어집니다. 접속에 반드시 필요한
-값(Impala의 `host`/`user`, S3의 버킷)이 끝까지 비어 있을 때만 오류가 납니다.
+값(Impala의 `host`/`user`, Greenplum의 `host`/`database`/`user`, S3의 버킷)이 끝까지
+비어 있을 때만 오류가 납니다.
 
 ### 설정 파일 세 개의 역할
 
@@ -127,24 +134,29 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-가짜 Impala 커서와 가짜 S3 클라이언트로 CSV 인코딩, 구분자 처리, 페이지네이션,
-삭제 안전장치, 자격증명 우선순위를 검증하므로 실제 Impala/S3 없이도 실행됩니다.
+가짜 커서와 가짜 S3 클라이언트로 CSV 인코딩, 구분자 처리, 템플릿 변수, 페이지네이션,
+삭제 안전장치, 트랜잭션 커밋/롤백, 자격증명 우선순위를 검증하므로 실제
+Impala/Greenplum/S3 없이도 실행됩니다.
 
 ## 프로젝트 구조
 
 ```
 src/
   appconfig.py          # conf/config.yaml 로딩, 환경변수 치환, 우선순위 규칙
+  sqlfile.py            # sql/ 의 .sql 찾기, Jinja 템플릿 채우기
   query_to_csv.py       # Impala 쿼리 → CSV 저장 (TLS + LDAP, 구간별 시간 측정)
+  gp_query.py           # Greenplum SQL 실행 → 표 또는 CSV
   s3_ops.py             # S3 업로드·삭제·디렉터리 생성/삭제·목록
 
 bin/
   query-to-csv          # src/query_to_csv.py 실행 래퍼
+  gp-query              # src/gp_query.py 실행 래퍼
   s3-ops                # src/s3_ops.py 실행 래퍼
 
 sql/
   daily_orders.sql      # 하루치 주문 (--var dt)
   order_range.sql       # 기간별 집계 (--var from_dt, to_dt)
+  order_summary.sql     # Greenplum 적재분 집계 (--var dt)
   README.md             # 템플릿 작성법
 
 conf/
@@ -153,6 +165,65 @@ conf/
   config.local.yaml     # --config 로 지정해 쓰는 로컬 값 (.gitignore 대상)
   impala-ca.pem         # Impala TLS 검증용 CA 인증서
 ```
+
+## Greenplum에 SQL 실행하기
+
+`src/gp_query.py`가 `conf/config.yaml`의 `greenplum` 섹션으로 접속해 SQL을 실행합니다.
+`sql/`의 템플릿과 `--var`는 `query-to-csv`와 똑같이 동작합니다.
+
+```bash
+export GP_PASSWORD='...'
+
+# 결과가 있으면 표로 보여줍니다
+bin/gp-query -f order_summary.sql --var dt=2026-08-01
+
+# CSV로 저장
+bin/gp-query -q "SELECT * FROM staging.orders" -o orders.csv
+
+# DDL/DML. 성공하면 커밋합니다.
+bin/gp-query -q "TRUNCATE staging.orders"
+```
+
+```
+order_dt   | status   | order_cnt | amount_sum
+-----------+----------+-----------+-----------
+2026-08-01 | 결제완료 | 12        | 10.50
+2026-08-01 | 취소     | NULL      | NULL
+2행, 0.03초
+```
+
+### 트랜잭션
+
+**SELECT든 DDL이든 한 트랜잭션에서 실행하고 성공하면 커밋합니다.** 중간에 실패하면
+전부 롤백되고 종료 코드 5로 끝납니다.
+
+`--dry-run`은 실행은 하되 **항상 롤백합니다.** 지우는 문장이 무엇을 건드리는지
+확인할 때 쓰세요.
+
+```bash
+bin/gp-query -f cleanup.sql --var dt=2026-08-01 --dry-run
+# 1,204행, 0.31초
+# --dry-run 이므로 롤백했습니다. 반영되지 않았습니다.
+```
+
+### 주요 옵션
+
+| 옵션 | 설명 |
+| --- | --- |
+| `-o`, `--output` | 결과를 CSV로 저장합니다. 생략하면 표로 출력합니다. |
+| `--max-rows` | 표로 출력할 최대 행 수 (기본 100). `0`이면 제한 없음. |
+| `--schema` | 쿼리 전에 `search_path`로 지정할 스키마. 설정의 `greenplum.schema`. |
+| `--session-sql` | 쿼리 전에 실행할 `SET` 문. 여러 번 지정 가능. |
+| `--dry-run` | 실행 후 항상 롤백합니다. |
+| `--debug` | 템플릿을 채운 뒤 실제로 보내는 SQL을 출력합니다. |
+| `--no-password-prompt` | 비밀번호를 묻지 않습니다. `.pgpass`나 trust 인증을 쓸 때. |
+
+행이 많으면 기본적으로 앞 100행만 보여주고 전체 개수를 알려줍니다. 전부 보려면
+`--max-rows 0`을, 파일로 받으려면 `-o`를 쓰세요.
+
+비밀번호는 `--password` 같은 인자로 받지 않습니다. 설정의 `greenplum.password`
+(보통 `${GP_PASSWORD}` 참조), 환경변수, 대화형 입력 순으로 찾습니다. 셋 다 없어도
+접속을 시도합니다 — `.pgpass`나 trust 인증을 쓰는 환경이 있기 때문입니다.
 
 ## S3 파일 다루기
 

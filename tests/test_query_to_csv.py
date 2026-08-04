@@ -599,6 +599,7 @@ def test_script_has_no_unexpected_dependency():
         "sasl",       # 선택: --sasl-backend sasl 일 때만 임포트한다
         "jinja2",     # 선택: SQL에 템플릿 문법이 있을 때만 임포트한다
         "appconfig",  # 같은 디렉터리의 설정 로더. PyYAML은 그쪽에서 지연 임포트한다.
+        "sqlfile",    # 같은 디렉터리의 쿼리 로더. Jinja2는 그쪽에서 지연 임포트한다.
     }
     assert modules <= stdlib | third_party, (
         f"허용되지 않은 의존성: {modules - stdlib - third_party}"
