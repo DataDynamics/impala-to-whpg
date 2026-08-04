@@ -1,11 +1,11 @@
 # sql/
 
-`bin/impala-query-to-csv` 와 `bin/gp-query` 가 `--query-file` 로 읽는 `.sql` 파일을 모아두는
+`bin/impala-query` 와 `bin/gp-query` 가 `--query-file` 로 읽는 `.sql` 파일을 모아두는
 곳입니다. 파일 이름만 주면 여기서 찾습니다.
 
 ```bash
-bin/impala-query-to-csv -f daily_orders.sql  --var dt=2026-08-01 -o orders.csv   # Impala
-bin/gp-query            -f order_summary.sql --var dt=2026-08-01                 # Greenplum
+bin/impala-query -f daily_orders.sql  --var dt=2026-08-01 -o orders.csv   # Impala
+bin/gp-query     -f order_summary.sql --var dt=2026-08-01                 # Greenplum
 ```
 
 두 도구가 같은 규칙으로 읽습니다. 다만 SQL 방언은 서로 달라서, 한 파일이 양쪽에서
@@ -29,7 +29,7 @@ SELECT * FROM sales.orders WHERE order_dt = '{{ dt }}'
 ```
 
 ```bash
-bin/impala-query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
+bin/impala-query -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
 ```
 
 조건문과 반복문도 씁니다.
@@ -76,7 +76,7 @@ WHERE order_dt = '{{ dt | default("2026-08-01") }}'
 변수가 의도대로 들어갔는지 여기서 확인하세요.
 
 ```bash
-bin/impala-query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv --debug
+bin/impala-query -f daily_orders.sql --var dt=2026-08-01 -o orders.csv --debug
 ```
 
 ```

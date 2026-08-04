@@ -10,16 +10,16 @@ TLS(SSL) 위에서 LDAP 인증(auth_mechanism=PLAIN)으로 접속하는 구성�
     #     pip install --use-pep517 pure-sasl thrift-sasl
 
     # 설정 파일에 접속 정보가 있을 때
-    bin/impala-query-to-csv \
+    bin/impala-query \
         --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
         --output orders.csv
 
     # sql/ 의 템플릿에 변수를 채워 실행
-    bin/impala-query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
+    bin/impala-query -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
 
     # 설정을 무시하고 전부 명령행으로
     export IMPALA_PASSWORD='...'
-    bin/impala-query-to-csv --no-config \
+    bin/impala-query --no-config \
         --host impala.example.com \
         --user etl_user \
         --ca-cert /etc/ssl/certs/impala-ca.pem \
@@ -530,20 +530,20 @@ def apply_config(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="bin/impala-query-to-csv",
+        prog="bin/impala-query",
         description="Impala 쿼리 결과를 CSV로 저장하고 구간별 소요 시간을 표시합니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "예시:\n"
             "  # sql/ 의 템플릿에 변수를 채워 실행\n"
-            "  bin/impala-query-to-csv -f daily_orders.sql -V dt=2026-08-01 -o orders.csv\n"
+            "  bin/impala-query -f daily_orders.sql -V dt=2026-08-01 -o orders.csv\n"
             "\n"
             "  # 쿼리를 직접 주고 gzip으로 저장\n"
-            "  bin/impala-query-to-csv -q \"SELECT * FROM sales.orders\" -o orders.csv.gz --gzip\n"
+            "  bin/impala-query -q \"SELECT * FROM sales.orders\" -o orders.csv.gz --gzip\n"
             "\n"
             "  # 설정을 무시하고 접속 정보를 전부 명령행으로\n"
-            "  bin/impala-query-to-csv --no-config --host impala.example.com -u etl_user \\\n"
-            "                          -q \"SELECT 1\" -o out.csv\n"
+            "  bin/impala-query --no-config --host impala.example.com -u etl_user \\\n"
+            "                   -q \"SELECT 1\" -o out.csv\n"
             "\n"
             f"접속 정보는 {appconfig.DEFAULT_CONFIG} 의\n"
             "impala 섹션에서 자동으로 읽습니다. 아래 인자를 주면 그 값이 우선합니다.\n"

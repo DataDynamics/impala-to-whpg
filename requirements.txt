@@ -1,4 +1,4 @@
-# impala-query-to-csv 에 필요하다.
+# impala-query 에 필요하다.
 impyla>=0.18.0
 
 # LDAP(PLAIN)과 Kerberos(GSSAPI) 인증에 필요하다. impyla는 auth_mechanism이

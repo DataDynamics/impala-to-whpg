@@ -1,12 +1,12 @@
 # S3 외부 테이블로 읽기
 
-`bin/impala-query-to-csv` 로 뽑은 파일을 `bin/s3-ops` 로 S3에 올려두면, Greenplum 외부
+`bin/impala-query` 로 뽑은 파일을 `bin/s3-ops` 로 S3에 올려두면, Greenplum 외부
 테이블로 그 파일을 직접 읽을 수 있습니다. 이 문서는 그 전제 조건인 Greenplum 쪽
 설정과 외부 테이블 작성법을 다룹니다.
 
 ```bash
 # 1) Impala에서 뽑고 (접속 정보는 conf/config.yaml 에서 온다)
-bin/impala-query-to-csv \
+bin/impala-query \
     --query "SELECT * FROM sales.orders WHERE dt = '2026-08-01'" \
     --output orders.csv.gz --delimiter $'\t' --null-string '\N' --no-header --gzip
 
@@ -105,7 +105,7 @@ DROP EXTERNAL TABLE ext_orders_20260801;
 
 몇 가지 짚어둘 점이 있습니다.
 
-- **`FORMAT` 절은 파일을 만든 옵션과 맞아야 합니다.** `impala-query-to-csv` 의 기본 구분자는
+- **`FORMAT` 절은 파일을 만든 옵션과 맞아야 합니다.** `impala-query` 의 기본 구분자는
   백틱(`` ` ``)이고 NULL은 빈 문자열입니다. 위 SQL처럼 TEXT 포맷으로 읽으려면 파일을
   뽑을 때 `--delimiter $'\t' --null-string '\N'` 을 주는 편이 편합니다. 헤더 행을
   넣었다면 `--no-header` 로 빼거나, `FORMAT 'CSV' (HEADER)` 로 읽어야 합니다.
@@ -122,12 +122,12 @@ DROP EXTERNAL TABLE ext_orders_20260801;
 **가장 중요한 튜닝 포인트입니다.** Greenplum은 S3 오브젝트를 세그먼트에 나눠
 할당하므로, 파일이 하나면 세그먼트 하나만 일합니다.
 
-`impala-query-to-csv` 는 결과를 파일 하나로 씁니다. 세그먼트를 다 쓰려면 쿼리를 파티션
+`impala-query` 는 결과를 파일 하나로 씁니다. 세그먼트를 다 쓰려면 쿼리를 파티션
 조건으로 쪼개 여러 번 실행해 파일을 나누세요.
 
 ```bash
 for dt in 2026-08-01 2026-08-02 2026-08-03; do
-    bin/impala-query-to-csv \
+    bin/impala-query \
         --query "SELECT * FROM sales.orders WHERE dt = '$dt'" \
         --output "out/orders-$dt.csv.gz" --gzip \
         --delimiter $'\t' --null-string '\N' --no-header

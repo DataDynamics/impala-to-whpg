@@ -1,4 +1,4 @@
-"""src/impala_query_to_csv.py 검증 (실제 Impala 없이 가짜 커서로 실행)."""
+"""src/impala_query.py 검증 (실제 Impala 없이 가짜 커서로 실행)."""
 
 import argparse
 import gzip
@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import impala_query_to_csv as q  # noqa: E402
+import impala_query as q  # noqa: E402
 
 
 class FakeCursor:
@@ -884,7 +884,7 @@ def test_no_arguments_prints_help(capsys):
     """인자 없이 실행하면 오류가 아니라 도움말을 보여준다."""
     assert q.main([]) == 0
     output = capsys.readouterr().out
-    assert "usage: bin/impala-query-to-csv" in output
+    assert "usage: bin/impala-query" in output
     assert "--query-file" in output
 
 
@@ -895,7 +895,7 @@ def test_no_arguments_does_not_read_the_config(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(q.appconfig, "DEFAULT_CONFIG", broken)
 
     assert q.main([]) == 0
-    assert "usage: bin/impala-query-to-csv" in capsys.readouterr().out
+    assert "usage: bin/impala-query" in capsys.readouterr().out
 
 
 def test_help_lists_examples(capsys):
