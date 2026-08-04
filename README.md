@@ -6,7 +6,7 @@ Impala 조회, Greenplum 실행, S3 조작을 위한 명령행 도구 모음입�
 | --- | --- |
 | `bin/impala-query` | Impala에 쿼리를 실행하고 결과를 표나 CSV로 보여줍니다. 구간별 소요 시간도 함께. |
 | `bin/gp-query` | Greenplum에 SQL을 실행하고 결과를 표나 CSV로 보여줍니다. |
-| `bin/s3-ops` | S3 업로드·삭제·디렉터리 생성/삭제·목록. |
+| `bin/s3-ops` | S3 업로드·다운로드·삭제·목록·내용 확인. |
 
 pip로 설치하지 않고 저장소에서 바로 실행합니다. `bin/` 아래 스크립트가 소스 위치를
 찾아 파이썬에 넘겨주므로 어느 디렉터리에서 호출해도 동작합니다. 다른 인터프리터를
@@ -335,16 +335,75 @@ bin/gp-query -f cleanup.sql --var dt=2026-08-01 --dry-run
 
 ## S3 파일 다루기
 
-`src/s3_ops.py`로 업로드, 삭제, 디렉터리 생성/삭제를 할 수 있습니다.
+`src/s3_ops.py`로 업로드, 다운로드, 삭제, 목록 확인을 할 수 있습니다.
 
 ```bash
-bin/s3-ops ls     s3://dw-stage/impala/
-bin/s3-ops upload orders.csv s3://dw-stage/impala/
-bin/s3-ops upload ./out/ s3://dw-stage/impala/out/ --recursive
-bin/s3-ops mkdir  s3://dw-stage/impala/2026-08-03/
-bin/s3-ops rm     s3://dw-stage/impala/orders.csv --yes
-bin/s3-ops rmdir  s3://dw-stage/impala/out/ --yes
+bin/s3-ops ls       s3://dw-stage/orders/
+bin/s3-ops upload   orders.csv s3://dw-stage/orders/
+bin/s3-ops upload   ./out/ s3://dw-stage/orders/2026-08-01/ --recursive
+bin/s3-ops download s3://dw-stage/orders/2026-08-01/ ./out/ --recursive
+bin/s3-ops head     s3://dw-stage/orders/2026-08-01/orders.csv.gz
+bin/s3-ops mkdir    s3://dw-stage/orders/2026-08-03/
+bin/s3-ops rm       s3://dw-stage/orders/orders.csv --yes
+bin/s3-ops rmdir    s3://dw-stage/orders/out/ --yes
 ```
+
+### 올린 파일 확인하기
+
+`head`는 앞부분만 `Range`로 받아 보여줍니다. 큰 파일도 부담이 없고, `.gz`는 알아서
+풉니다. **올린 CSV의 구분자·NULL 표기·인코딩이 의도대로인지** 확인할 때 씁니다.
+Greenplum 외부 테이블의 `FORMAT` 절과 어긋나면 여기서 바로 드러납니다.
+
+```bash
+bin/s3-ops head s3://dw-stage/orders/2026-08-01/part-0.csv.gz -n 3
+```
+
+```
+order0`김철수`10.50`2026-08-01
+order1`김철수`10.50`2026-08-01
+order2`김철수`10.50`2026-08-01
+앞 547.0B만 받아 3줄 표시했습니다.
+```
+
+`ls --summary`는 목록 대신 개수와 크기 분포를 냅니다. **외부 테이블로 읽을 파일이
+세그먼트 수만큼 고르게 나뉘었는지** 보는 용도입니다.
+
+```bash
+bin/s3-ops ls s3://dw-stage/orders/ --summary
+```
+
+```
+파일 3개, 합계 2.1KB
+최소 547.0B / 평균 706.0B / 최대 888.0B
+```
+
+`ls --dirs`는 파일 대신 한 단계 아래 디렉터리만 보여줍니다. 실행 단위가 몇 개
+남았는지 훑을 때 편합니다.
+
+### 오래된 것 정리하기
+
+`--older-than`으로 기간을 넘긴 것만 고를 수 있습니다. 단위는 `m`(분) `h`(시간)
+`d`(일) `w`(주)이고, 단위를 빼면 시간입니다.
+
+```bash
+bin/s3-ops ls    s3://dw-stage/orders/ --older-than 7d          # 확인만
+bin/s3-ops rmdir s3://dw-stage/orders/ --older-than 7d --yes    # 정리
+```
+
+크론에 걸어두면 적재 후 남은 파일이 쌓이지 않습니다.
+
+```cron
+0 4 * * * /srv/impala-to-whpg/bin/s3-ops rmdir s3://dw-stage/orders/ --older-than 7d --yes >> /var/log/etl.log 2>&1
+```
+
+### 다운로드
+
+```bash
+bin/s3-ops download s3://dw-stage/orders/2026-08-01/ ./out/ --recursive
+```
+
+**이미 있는 로컬 파일은 건너뜁니다.** 되돌릴 수 없는 건 S3 쪽만이 아니라서, 덮어쓰려면
+`--force`를 줘야 합니다.
 
 **S3에는 디렉터리가 없습니다.** 키가 `a/b/c.csv`인 오브젝트가 있을 뿐이고, 콘솔이
 슬래시를 보고 폴더처럼 보여줄 뿐입니다. 그래서 이 스크립트에서는
@@ -371,6 +430,7 @@ bin/s3-ops rmdir  s3://dw-stage/impala/out/ --yes
 | `--endpoint` | S3 호환 스토리지 엔드포인트 (MinIO 등) |
 | `-c`, `--config` | 다른 설정 파일 지정 (기본 `conf/config.yaml`) |
 | `--no-config` | 설정 파일을 읽지 않음 |
+| `--debug` | 오류가 나면 전체 스택 트레이스를 출력 |
 
 ```bash
 # 버킷을 미리 주면 키만 써도 됩니다

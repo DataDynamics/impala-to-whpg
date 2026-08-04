@@ -2,7 +2,7 @@
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -62,6 +62,20 @@ class FakeS3Client:
         self.objects[Key] = Body
 
     # -- 읽기 --
+    def download_file(self, bucket, key, local):
+        Path(local).write_bytes(self.objects[key])
+
+    def get_object(self, Bucket, Key, Range=None):
+        import io as _io
+
+        if Key not in self.objects:
+            raise ClientError("404")
+        data = self.objects[Key]
+        if Range:
+            end = int(Range.split("-")[1])
+            data = data[: end + 1]
+        return {"Body": _io.BytesIO(data)}
+
     def head_object(self, Bucket, Key):
         if Key not in self.objects:
             raise ClientError("404")
@@ -113,6 +127,15 @@ def args_for(command: str, **overrides) -> argparse.Namespace:
         yes=True,
         recursive=False,
         sse=None,
+        force=False,
+        summary=False,
+        dirs=False,
+        older_than=None,
+        destination=None,
+        lines=10,
+        max_bytes=64 * 1024,
+        encoding="utf-8",
+        raw=False,
     )
     options.update(overrides)
     return argparse.Namespace(**options)
@@ -401,7 +424,7 @@ def test_no_arguments_prints_help(capsys):
     assert s.main([]) == 0
     output = capsys.readouterr().out
     assert "usage: bin/s3-ops" in output
-    assert "{ls,upload,mkdir,rm,rmdir}" in output
+    assert "{ls,upload,download,head,mkdir,rm,rmdir}" in output
 
 
 def test_no_arguments_does_not_build_a_client(monkeypatch, capsys):
@@ -725,3 +748,213 @@ def test_every_command_has_a_handler():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# -- download ---------------------------------------------------------------------
+
+
+def test_download_single_file(tmp_path):
+    client = FakeS3Client({"impala/a.csv": b"1,2,3\n"})
+    target = tmp_path / "a.csv"
+    assert s.cmd_download(client, args_for("download", uri="s3://b/impala/a.csv",
+                                           destination=str(target))) == 0
+    assert target.read_bytes() == b"1,2,3\n"
+
+
+def test_download_into_a_directory_keeps_the_name(tmp_path):
+    client = FakeS3Client({"impala/a.csv": b"x"})
+    s.cmd_download(client, args_for("download", uri="s3://b/impala/a.csv",
+                                    destination=str(tmp_path)))
+    assert (tmp_path / "a.csv").exists()
+
+
+def test_download_recursive_keeps_structure(tmp_path):
+    client = FakeS3Client({
+        "impala/2026-08-01/a.csv": b"a",
+        "impala/2026-08-01/sub/b.csv": b"b",
+    })
+    s.cmd_download(client, args_for("download", uri="s3://b/impala/2026-08-01/",
+                                    destination=str(tmp_path), recursive=True))
+    assert (tmp_path / "a.csv").read_bytes() == b"a"
+    assert (tmp_path / "sub" / "b.csv").read_bytes() == b"b"
+
+
+def test_download_skips_directory_markers(tmp_path):
+    client = FakeS3Client({"impala/out/": b"", "impala/out/a.csv": b"a"})
+    s.cmd_download(client, args_for("download", uri="s3://b/impala/out/",
+                                    destination=str(tmp_path), recursive=True))
+    assert sorted(p.name for p in tmp_path.rglob("*")) == ["a.csv"]
+
+
+def test_download_does_not_overwrite_without_force(tmp_path, capsys):
+    """로컬 파일을 조용히 덮어쓰지 않는다. 되돌릴 수 없는 건 S3 쪽만이 아니다."""
+    target = tmp_path / "a.csv"
+    target.write_bytes("기존 내용".encode())
+    client = FakeS3Client({"impala/a.csv": "새 내용".encode()})
+
+    s.cmd_download(client, args_for("download", uri="s3://b/impala/a.csv",
+                                    destination=str(target)))
+    assert target.read_bytes() == "기존 내용".encode()
+    assert "--force" in capsys.readouterr().err
+
+
+def test_download_force_overwrites(tmp_path):
+    target = tmp_path / "a.csv"
+    target.write_bytes(b"old")
+    client = FakeS3Client({"impala/a.csv": b"new"})
+    s.cmd_download(client, args_for("download", uri="s3://b/impala/a.csv",
+                                    destination=str(target), force=True))
+    assert target.read_bytes() == b"new"
+
+
+def test_download_dry_run_writes_nothing(tmp_path, capsys):
+    client = FakeS3Client({"impala/a.csv": b"x"})
+    s.cmd_download(client, args_for("download", uri="s3://b/impala/a.csv",
+                                    destination=str(tmp_path / "a.csv"), dry_run=True))
+    assert not (tmp_path / "a.csv").exists()
+    assert "[예행]" in capsys.readouterr().out
+
+
+def test_download_empty_prefix_is_not_an_error(tmp_path, capsys):
+    assert s.cmd_download(FakeS3Client(), args_for("download", uri="s3://b/none/",
+                                                   destination=str(tmp_path),
+                                                   recursive=True)) == 0
+    assert "받을 파일이 없습니다" in capsys.readouterr().out
+
+
+# -- head -------------------------------------------------------------------------
+
+
+def test_head_shows_the_first_lines(capsys):
+    body = "\n".join(f"line{i}" for i in range(50)).encode()
+    client = FakeS3Client({"impala/a.csv": body})
+    assert s.cmd_head(client, args_for("head", uri="s3://b/impala/a.csv", lines=3)) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["line0", "line1", "line2"]
+
+
+def test_head_decompresses_gzip():
+    import gzip as _gzip
+
+    raw = _gzip.compress("가나다\n라마바\n".encode())
+    client = FakeS3Client({"impala/a.csv.gz": raw})
+    assert s.cmd_head(client, args_for("head", uri="s3://b/impala/a.csv.gz")) == 0
+
+
+def test_head_raw_skips_decompression(capsys):
+    import gzip as _gzip
+
+    client = FakeS3Client({"a.gz": _gzip.compress(b"hello")})
+    s.cmd_head(client, args_for("head", uri="s3://b/a.gz", raw=True))
+    assert "hello" not in capsys.readouterr().out
+
+
+def test_head_missing_file_returns_1(capsys):
+    assert s.cmd_head(FakeS3Client(), args_for("head", uri="s3://b/none.csv")) == 1
+    assert "없는 파일" in capsys.readouterr().err
+
+
+def test_head_rejects_a_prefix():
+    with pytest.raises(SystemExit):
+        s.cmd_head(FakeS3Client(), args_for("head", uri="s3://b/impala/"))
+
+
+def test_head_survives_broken_multibyte_at_the_edge(capsys):
+    """앞부분만 받으면 마지막 글자가 잘릴 수 있다. 죽지 않아야 한다."""
+    client = FakeS3Client({"a.csv": "가나다라마바사".encode()})
+    s.cmd_head(client, args_for("head", uri="s3://b/a.csv", max_bytes=8))
+    assert capsys.readouterr().out
+
+
+# -- ls 확장 ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,seconds",
+    [("90m", 5400), ("24h", 86400), ("7d", 604800), ("2w", 1209600), ("12", 43200)],
+)
+def test_parse_duration(text, seconds):
+    assert s.parse_duration(text) == seconds
+
+
+@pytest.mark.parametrize("bad", ["", "어제", "3x", "h"])
+def test_parse_duration_rejects_bad_input(bad):
+    with pytest.raises(SystemExit):
+        s.parse_duration(bad)
+
+
+def aged(days: int) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def test_older_than_filters_by_age():
+    objects = [
+        {"Key": "old", "Size": 1, "LastModified": aged(10)},
+        {"Key": "new", "Size": 1, "LastModified": aged(1)},
+    ]
+    assert [o["Key"] for o in s.older_than(objects, 5 * 86400)] == ["old"]
+
+
+class AgedClient(FakeS3Client):
+    """LastModified 를 지정할 수 있는 클라이언트."""
+
+    def __init__(self, aged_objects) -> None:
+        super().__init__({k: b"x" for k, _ in aged_objects})
+        self._aged = list(aged_objects)
+
+    def get_paginator(self, name):
+        entries = [
+            {"Key": k, "Size": 1, "LastModified": when} for k, when in self._aged
+        ]
+
+        class Paginator:
+            def paginate(self, Bucket, Prefix="", Delimiter=None):
+                return iter([{"Contents": [e for e in entries
+                                           if e["Key"].startswith(Prefix)]}])
+
+        return Paginator()
+
+
+def test_ls_older_than_filters(capsys):
+    client = AgedClient([("a.csv", aged(10)), ("b.csv", aged(1))])
+    s.cmd_ls(client, args_for("ls", uri="s3://b/", older_than="5d"))
+    out = capsys.readouterr().out
+    assert "a.csv" in out and "b.csv" not in out
+
+
+def test_ls_summary_shows_distribution(capsys):
+    client = FakeS3Client({f"p/{i}.csv": b"x" * (i + 1) * 100 for i in range(5)})
+    s.cmd_ls(client, args_for("ls", uri="s3://b/p/", summary=True))
+    out = capsys.readouterr().out
+    assert "파일 5개" in out
+    assert "최소" in out and "평균" in out and "최대" in out
+
+
+def test_ls_dirs_lists_one_level(capsys):
+    class WithPrefixes(FakeS3Client):
+        def get_paginator(self, name):
+            class P:
+                def paginate(self, Bucket, Prefix="", Delimiter=None):
+                    assert Delimiter == "/"
+                    return iter([{"CommonPrefixes": [
+                        {"Prefix": "orders/2026-08-01/"},
+                        {"Prefix": "orders/2026-08-02/"},
+                    ]}])
+            return P()
+
+    s.cmd_ls(WithPrefixes(), args_for("ls", uri="s3://b/orders/", dirs=True))
+    out = capsys.readouterr().out
+    assert "orders/2026-08-01/" in out and "2개" in out
+
+
+def test_rmdir_older_than_only_deletes_old_objects():
+    client = AgedClient([("p/a.csv", aged(10)), ("p/b.csv", aged(1))])
+    s.cmd_rmdir(client, args_for("rmdir", uri="s3://b/p/", older_than="5d"))
+    assert client.delete_calls == [["p/a.csv"]]
+
+
+def test_rmdir_older_than_says_so_when_nothing_matches(capsys):
+    client = AgedClient([("p/a.csv", aged(1))])
+    s.cmd_rmdir(client, args_for("rmdir", uri="s3://b/p/", older_than="9999d"))
+    assert "지울 오브젝트가 없습니다" in capsys.readouterr().out
+    assert client.delete_calls == []

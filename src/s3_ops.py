@@ -1,11 +1,11 @@
-"""S3 파일·디렉터리 조작 (업로드, 삭제, 디렉터리 생성/삭제, 목록).
+"""S3 파일·디렉터리 조작 (업로드, 다운로드, 삭제, 목록, 내용 확인).
 
-    bin/s3-ops ls     s3://dw-stage/impala/
-    bin/s3-ops upload orders.csv s3://dw-stage/impala/orders.csv
-    bin/s3-ops upload ./out/ s3://dw-stage/impala/out/ --recursive
-    bin/s3-ops mkdir  s3://dw-stage/impala/2026-08-03/
-    bin/s3-ops rm     s3://dw-stage/impala/orders.csv --yes
-    bin/s3-ops rmdir  s3://dw-stage/impala/2026-08-03/ --yes
+    bin/s3-ops ls       s3://dw-stage/orders/
+    bin/s3-ops ls       s3://dw-stage/orders/ --summary
+    bin/s3-ops upload   orders.csv s3://dw-stage/orders/
+    bin/s3-ops download s3://dw-stage/orders/2026-08-01/ ./out/ --recursive
+    bin/s3-ops head     s3://dw-stage/orders/2026-08-01/part-0.csv.gz
+    bin/s3-ops rmdir    s3://dw-stage/orders/ --older-than 7d --yes
 
 S3에는 디렉터리가 없다. 키가 ``a/b/c.csv`` 인 오브젝트가 있을 뿐이고, 콘솔이
 슬래시를 보고 폴더처럼 보여줄 뿐이다. 그래서 이 스크립트에서는
@@ -184,11 +184,87 @@ def confirm(question: str, assume_yes: bool) -> bool:
 # -- 명령 -------------------------------------------------------------------------
 
 
+#: --older-than 이 받는 단위
+DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_duration(text: str) -> float:
+    """``24h`` / ``7d`` / ``90m`` 을 초로 바꾼다. 단위가 없으면 시간으로 본다."""
+    value = text.strip().lower()
+    unit = DURATION_UNITS.get(value[-1:], None)
+    number = value[:-1] if unit else value
+    try:
+        amount = float(number)
+    except ValueError:
+        raise SystemExit(
+            f"기간 형식이 잘못되었습니다: {text!r}\n"
+            "  90m(분), 24h(시간), 7d(일), 2w(주) 처럼 주세요. 단위를 빼면 시간입니다."
+        )
+    return amount * (unit or 3600)
+
+
+def older_than(objects: Iterable[Dict[str, Any]], seconds: float) -> List[Dict[str, Any]]:
+    """지정한 기간보다 오래된 오브젝트만 고른다.
+
+    LastModified 는 UTC 기준 timezone-aware datetime 이라 비교 대상도 tz 를 붙여야
+    한다. naive datetime 과 비교하면 TypeError 가 난다.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    return [o for o in objects if o["LastModified"] < cutoff]
+
+
+def list_directories(client: Any, bucket: str, prefix: str) -> List[str]:
+    """접두사 바로 아래 "디렉터리" 목록만 돌려준다.
+
+    Delimiter 를 주면 그 아래는 접어서 CommonPrefixes 로 준다. 실행 단위가 몇 개
+    남아 있는지 훑을 때 파일을 전부 나열하지 않아도 된다.
+    """
+    paginator = client.get_paginator("list_objects_v2")
+    prefixes: List[str] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+        prefixes.extend(entry["Prefix"] for entry in page.get("CommonPrefixes", []))
+    return sorted(prefixes)
+
+
+def print_summary(objects: Sequence[Dict[str, Any]]) -> None:
+    """개수와 크기 분포. 파일이 고르게 나뉘었는지 보는 용도다.
+
+    외부 테이블로 읽을 파일이라면 개수가 세그먼트 수보다 많아야 모든 세그먼트가
+    일한다. docs/s3_external_table.md 참고.
+    """
+    sizes = [o["Size"] for o in objects]
+    total = sum(sizes)
+    print(f"파일 {len(sizes)}개, 합계 {human(total)}")
+    print(
+        f"최소 {human(min(sizes))} / 평균 {human(total / len(sizes))} / "
+        f"최대 {human(max(sizes))}"
+    )
+
+
 def cmd_ls(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
     bucket, key = resolve_target(args.uri, bucket)
+
+    if getattr(args, "dirs", False):
+        prefixes = list_directories(client, bucket, as_directory(key) if key else "")
+        if not prefixes:
+            print(f"s3://{bucket}/{key} 아래에 디렉터리가 없습니다.")
+            return 0
+        for prefix in prefixes:
+            print(prefix)
+        print(f"\n{len(prefixes)}개")
+        return 0
+
     objects = list_objects(client, bucket, key)
+    if getattr(args, "older_than", None):
+        objects = older_than(objects, parse_duration(args.older_than))
     if not objects:
         print(f"s3://{bucket}/{key} 아래에 오브젝트가 없습니다.")
+        return 0
+
+    if getattr(args, "summary", False):
+        print_summary(objects)
         return 0
 
     for obj in sorted(objects, key=lambda o: o["Key"]):
@@ -255,6 +331,125 @@ def cmd_upload(client: Any, args: argparse.Namespace, bucket: Optional[str] = No
     return 0
 
 
+def iter_download_pairs(
+    client: Any, bucket: str, key: str, destination: str, recursive: bool
+) -> List[Tuple[str, str]]:
+    """(S3 키, 로컬 경로) 쌍을 만든다.
+
+    접두사를 받으면 그 아래 구조를 로컬에 그대로 편다. 파일 하나를 받을 때 대상이
+    디렉터리면 원래 이름을 그대로 쓴다.
+    """
+    if recursive or key.endswith("/"):
+        prefix = as_directory(key) if key else ""
+        objects = list_objects(client, bucket, prefix)
+        pairs = []
+        for obj in sorted(objects, key=lambda o: o["Key"]):
+            if obj["Key"].endswith("/"):
+                continue  # 디렉터리 표시용 빈 오브젝트는 건너뛴다
+            relative = obj["Key"][len(prefix):]
+            pairs.append((obj["Key"], str(Path(destination) / relative)))
+        return pairs
+
+    target = Path(destination)
+    if target.is_dir() or destination.endswith(os.sep):
+        target = target / key.rsplit("/", 1)[-1]
+    return [(key, str(target))]
+
+
+def cmd_download(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    bucket, key = resolve_target(args.uri, bucket)
+    pairs = iter_download_pairs(client, bucket, key, args.destination, args.recursive)
+    if not pairs:
+        print(f"받을 파일이 없습니다: s3://{bucket}/{key}")
+        return 0
+
+    reporter = progress.Progress(
+        "다운로드",
+        total=len(pairs),
+        unit="개",
+        enabled=len(pairs) > 1 and not getattr(args, "no_progress", False),
+    )
+    downloaded = skipped = 0
+    for done, (source_key, local) in enumerate(pairs, 1):
+        if args.dry_run:
+            print(f"[예행] s3://{bucket}/{source_key} → {local}")
+            continue
+        # 로컬 파일을 조용히 덮어쓰지 않는다. 되돌릴 수 없는 건 S3 쪽만이 아니다.
+        if os.path.exists(local) and not args.force:
+            print(f"이미 있어 건너뜁니다: {local}  (덮어쓰려면 --force)", file=sys.stderr)
+            skipped += 1
+            continue
+        parent = os.path.dirname(local)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        client.download_file(bucket, source_key, local)
+        downloaded += 1
+        reporter.update(done)
+        print(f"s3://{bucket}/{source_key} → {local} ({human(os.path.getsize(local))})")
+    reporter.finish()
+
+    if not args.dry_run:
+        note = f"\n{downloaded}개 다운로드"
+        if skipped:
+            note += f", {skipped}개 건너뜀"
+        print(note)
+    return 0
+
+
+def read_prefix_bytes(client: Any, bucket: str, key: str, max_bytes: int) -> bytes:
+    """오브젝트 앞부분만 Range 로 받는다. 큰 파일도 전부 받지 않는다."""
+    response = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{max_bytes - 1}")
+    return response["Body"].read()
+
+
+def decompress_if_gzip(data: bytes) -> bytes:
+    """gzip 이면 푼다. 앞부분만 받았으므로 끝이 잘려 있는 것이 정상이다."""
+    if not data.startswith(b"\x1f\x8b"):
+        return data
+    import zlib
+
+    # gzip 헤더를 이해하는 디코더. 잘린 스트림이라 마지막 블록에서 예외가 나는데,
+    # 그때까지 푼 만큼은 쓸 수 있으므로 무시한다.
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        return decoder.decompress(data)
+    except zlib.error:
+        return decoder.flush() or b""
+
+
+def cmd_head(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    """오브젝트 앞부분을 보여준다. 올린 파일이 제대로 됐는지 확인할 때 쓴다."""
+    bucket, key = resolve_target(args.uri, bucket)
+    if not key or key.endswith("/"):
+        raise SystemExit(f"파일 하나를 지정하세요: {args.uri}")
+
+    from botocore.exceptions import ClientError
+
+    try:
+        raw = read_prefix_bytes(client, bucket, key, args.max_bytes)
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code in ("404", "NoSuchKey"):
+            print(f"없는 파일입니다: s3://{bucket}/{key}", file=sys.stderr)
+            return 1
+        raise
+
+    data = raw if args.raw else decompress_if_gzip(raw)
+    # 잘린 멀티바이트 문자가 끝에 걸릴 수 있으므로 replace 로 흘려보낸다
+    text = data.decode(args.encoding, errors="replace")
+
+    lines = text.splitlines()
+    shown = lines if args.lines <= 0 else lines[: args.lines]
+    for line in shown:
+        print(line)
+
+    print(
+        f"\n앞 {human(len(raw))}만 받아 {len(shown)}줄 표시했습니다.",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_mkdir(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
     bucket, key = resolve_target(args.uri, bucket)
     if not key:
@@ -311,12 +506,17 @@ def cmd_rmdir(client: Any, args: argparse.Namespace, bucket: Optional[str] = Non
     prefix = as_directory(key)
 
     objects = list_objects(client, bucket, prefix)
+    window = getattr(args, "older_than", None)
+    if window:
+        objects = older_than(objects, parse_duration(window))
     if not objects:
-        print(f"s3://{bucket}/{prefix} 아래에 지울 오브젝트가 없습니다.")
+        scope = f" ({window} 보다 오래된 것)" if window else ""
+        print(f"s3://{bucket}/{prefix} 아래에 지울 오브젝트가 없습니다{scope}.")
         return 0
 
     total = sum(o["Size"] for o in objects)
-    print(f"삭제 대상: s3://{bucket}/{prefix}")
+    scope = f" ({window} 보다 오래된 것만)" if window else ""
+    print(f"삭제 대상: s3://{bucket}/{prefix}{scope}")
     for obj in sorted(objects, key=lambda o: o["Key"])[:10]:
         print(f"  {obj['Key']}  ({human(obj['Size'])})")
     if len(objects) > 10:
@@ -348,6 +548,8 @@ def cmd_rmdir(client: Any, args: argparse.Namespace, bucket: Optional[str] = Non
 COMMANDS = {
     "ls": cmd_ls,
     "upload": cmd_upload,
+    "download": cmd_download,
+    "head": cmd_head,
     "mkdir": cmd_mkdir,
     "rm": cmd_rm,
     "rmdir": cmd_rmdir,
@@ -357,16 +559,17 @@ COMMANDS = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bin/s3-ops",
-        description="S3 파일·디렉터리 조작 (업로드, 삭제, 디렉터리 생성/삭제, 목록)",
+        description="S3 파일·디렉터리 조작 (업로드, 다운로드, 삭제, 목록, 내용 확인)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "예시:\n"
-            "  bin/s3-ops ls     s3://dw-stage/impala/\n"
-            "  bin/s3-ops upload orders.csv s3://dw-stage/impala/\n"
-            "  bin/s3-ops upload ./out/ s3://dw-stage/impala/out/ --recursive\n"
-            "  bin/s3-ops mkdir  s3://dw-stage/impala/2026-08-03/\n"
-            "  bin/s3-ops rm     s3://dw-stage/impala/orders.csv --yes\n"
-            "  bin/s3-ops rmdir  s3://dw-stage/impala/2026-08-03/ --yes\n"
+            "  bin/s3-ops ls       s3://dw-stage/orders/\n"
+            "  bin/s3-ops ls       s3://dw-stage/orders/ --summary\n"
+            "  bin/s3-ops upload   ./out/ s3://dw-stage/orders/2026-08-01/ --recursive\n"
+            "  bin/s3-ops download s3://dw-stage/orders/2026-08-01/ ./out/ --recursive\n"
+            "  bin/s3-ops head     s3://dw-stage/orders/2026-08-01/part-0.csv.gz\n"
+            "  bin/s3-ops rm       s3://dw-stage/orders/orders.csv --yes\n"
+            "  bin/s3-ops rmdir    s3://dw-stage/orders/ --older-than 7d --yes\n"
             "\n"
             "  # --bucket 을 주면 s3:// 없이 키만 써도 됩니다\n"
             "  bin/s3-ops --bucket dw-stage ls impala/\n"
@@ -422,12 +625,47 @@ def build_parser() -> argparse.ArgumentParser:
 
     ls = sub.add_parser("ls", help="접두사 아래 오브젝트 목록")
     ls.add_argument("uri", help="s3://버킷/접두사")
+    ls.add_argument(
+        "--summary", action="store_true", help="목록 대신 개수와 크기 분포만 봅니다"
+    )
+    ls.add_argument(
+        "--dirs", action="store_true", help="파일 대신 한 단계 아래 디렉터리만 봅니다"
+    )
+    ls.add_argument(
+        "--older-than",
+        metavar="기간",
+        help="이 기간보다 오래된 것만 (예: 24h, 7d, 90m). 단위를 빼면 시간입니다.",
+    )
 
     upload = sub.add_parser("upload", help="파일 또는 디렉터리 업로드")
     upload.add_argument("source", help="로컬 파일 또는 디렉터리")
     upload.add_argument("uri", help="s3://버킷/키 (또는 s3://버킷/접두사/)")
     upload.add_argument("-r", "--recursive", action="store_true", help="디렉터리 전체 업로드")
     upload.add_argument("--sse", help="서버측 암호화 (예: AES256)")
+
+    download = sub.add_parser("download", help="파일 또는 접두사 전체 다운로드")
+    download.add_argument("uri", help="s3://버킷/키 (또는 s3://버킷/접두사/)")
+    download.add_argument("destination", help="저장할 로컬 파일 또는 디렉터리")
+    download.add_argument(
+        "-r", "--recursive", action="store_true", help="접두사 아래 전체 다운로드"
+    )
+    download.add_argument(
+        "--force", action="store_true", help="이미 있는 로컬 파일을 덮어씁니다"
+    )
+
+    head = sub.add_parser("head", help="오브젝트 앞부분 보기 (.gz 자동 해제)")
+    head.add_argument("uri", help="s3://버킷/키")
+    head.add_argument(
+        "-n", "--lines", type=int, default=10, help="보여줄 줄 수 (기본 10, 0이면 전부)"
+    )
+    head.add_argument(
+        "--max-bytes",
+        type=int,
+        default=64 * 1024,
+        help="받아올 최대 바이트 (기본 64KB). 압축 파일이면 푼 뒤가 더 길어집니다.",
+    )
+    head.add_argument("--encoding", default="utf-8", help="파일 인코딩 (기본 utf-8)")
+    head.add_argument("--raw", action="store_true", help="gzip 자동 해제를 하지 않습니다")
 
     mkdir = sub.add_parser("mkdir", help="디렉터리 표시용 빈 오브젝트 생성")
     mkdir.add_argument("uri", help="s3://버킷/접두사/")
@@ -439,6 +677,11 @@ def build_parser() -> argparse.ArgumentParser:
     rmdir = sub.add_parser("rmdir", help="접두사 아래 오브젝트 전체 삭제")
     rmdir.add_argument("uri", help="s3://버킷/접두사/")
     rmdir.add_argument("-y", "--yes", action="store_true", help="확인 없이 삭제")
+    rmdir.add_argument(
+        "--older-than",
+        metavar="기간",
+        help="이 기간보다 오래된 것만 지웁니다 (예: 24h, 7d). 크론 정리에 씁니다.",
+    )
 
     return parser
 
