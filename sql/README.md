@@ -4,9 +4,11 @@
 곳입니다. 파일 이름만 주면 여기서 찾습니다.
 
 ```bash
-bin/impala-query -f daily_orders.sql  --var dt=2026-08-01 -o orders.csv   # Impala
-bin/gp-query     -f order_summary.sql --var dt=2026-08-01                 # Greenplum
+bin/impala-query -f daily_orders.sql  --var dt=2026-08-01   # Impala
+bin/gp-query     -f order_summary.sql --var dt=2026-08-01   # Greenplum
 ```
+
+둘 다 `-o` 없이 실행하면 결과를 표로 보여주고, `-o`를 주면 CSV 파일로 씁니다.
 
 두 도구가 같은 규칙으로 읽습니다. 다만 SQL 방언은 서로 달라서, 한 파일이 양쪽에서
 다 도는 것은 아닙니다. 어느 쪽을 위한 쿼리인지 파일 첫 줄 주석에 적어두면 좋습니다.

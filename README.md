@@ -4,7 +4,7 @@ Impala 조회, Greenplum 실행, S3 조작을 위한 명령행 도구 모음입�
 
 | 도구 | 하는 일 |
 | --- | --- |
-| `bin/impala-query` | Impala에서 쿼리를 실행해 CSV로 저장하고 구간별 소요 시간을 보여줍니다. |
+| `bin/impala-query` | Impala에 쿼리를 실행하고 결과를 표나 CSV로 보여줍니다. 구간별 소요 시간도 함께. |
 | `bin/gp-query` | Greenplum에 SQL을 실행하고 결과를 표나 CSV로 보여줍니다. |
 | `bin/s3-ops` | S3 업로드·삭제·디렉터리 생성/삭제·목록. |
 
@@ -233,7 +233,8 @@ src/
   appconfig.py         # conf/config.yaml 로딩, 환경변수 치환, 우선순위 규칙
   sqlfile.py           # sql/ 의 .sql 찾기, Jinja 템플릿 채우기
   progress.py          # 구간별 소요 시간, 진행 상황 (크론 대응)
-  impala_query.py      # Impala 쿼리 → CSV 저장 (TLS + LDAP, 구간별 시간 측정)
+  table.py             # -o 없을 때의 표 출력, 필요한 만큼만 받기
+  impala_query.py      # Impala 쿼리 실행 → 표 또는 CSV (TLS + LDAP)
   gp_query.py          # Greenplum SQL 실행 → 표 또는 CSV
   s3_ops.py            # S3 업로드·삭제·디렉터리 생성/삭제·목록
 
@@ -307,8 +308,10 @@ bin/gp-query -f cleanup.sql --var dt=2026-08-01 --dry-run
 | `--debug` | 템플릿을 채운 뒤 실제로 보내는 SQL을 출력합니다. |
 | `--no-password-prompt` | 비밀번호를 묻지 않습니다. `.pgpass`나 trust 인증을 쓸 때. |
 
-행이 많으면 기본적으로 앞 100행만 보여주고 전체 개수를 알려줍니다. 전부 보려면
-`--max-rows 0`을, 파일로 받으려면 `-o`를 쓰세요.
+행이 많으면 앞 100행만 보여주고 멈춥니다. **보여줄 만큼만 받고 끊기 때문에 총
+개수는 알 수 없고 `100행 이상`으로 표시합니다.** 100행을 보려고 수백만 행을
+받아오지 않기 위해서입니다. 정확한 개수가 필요하면 `--max-rows 0`으로 전부 받거나
+`-o`로 파일에 받으세요.
 
 비밀번호는 `--password` 같은 인자로 받지 않습니다. 설정의 `greenplum.password`
 (보통 `${GP_PASSWORD}` 참조), 환경변수, 대화형 입력 순으로 찾습니다. 셋 다 없어도
@@ -370,10 +373,17 @@ bin/s3-ops --endpoint http://minio:9000 --bucket dw-stage \
 `AWS_SECRET_ACCESS_KEY` 환경변수나 설정 파일의 `${AWS_SECRET_ACCESS_KEY}` 참조를
 쓰세요.
 
-## Impala 쿼리를 CSV로 내려받기
+## Impala에 쿼리 실행하기
 
-`src/impala_query.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
-시간을 썼는지 보여줍니다.
+`src/impala_query.py`가 TLS + LDAP 접속으로 조회해 **`-o`가 없으면 표로, 있으면
+CSV 파일로** 내보냅니다. 어느 구간에 시간을 썼는지도 함께 보여줍니다.
+
+```bash
+bin/impala-query -f daily_orders.sql -V dt=2026-08-01          # 표로 확인
+bin/impala-query -f daily_orders.sql -V dt=2026-08-01 -o out.csv  # 파일로 저장
+```
+
+`gp-query`와 같은 규칙입니다. 표는 기본 100행까지 보여주고 `--max-rows`로 조절합니다.
 
 접속 정보는 `conf/config.yaml`의 `impala` 섹션에서, 쿼리는 `sql/`의 `.sql` 템플릿에서
 옵니다. `--host`, `-u/--user`, `--ca-cert`, `--auth-mechanism` 등으로 개별 값만 덮어쓸

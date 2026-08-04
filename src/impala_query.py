@@ -1,20 +1,22 @@
-"""Impala에서 쿼리를 실행해 CSV 파일로 저장하고, 구간별 소요 시간을 보여준다.
+"""Impala에 쿼리를 실행해 표나 CSV로 보여주고, 구간별 소요 시간을 알려준다.
 
 TLS(SSL) 위에서 LDAP 인증(auth_mechanism=PLAIN)으로 접속하는 구성을 전제로 한다.
 
 접속 정보는 conf/config.yaml 의 impala 섹션에서 자동으로 읽는다. 명령행으로 준 값이
-항상 우선하므로, 설정을 채워두면 쿼리와 출력 경로만 주면 된다.
+항상 우선하므로, 설정을 채워두면 쿼리만 주면 된다.
+
+``-o`` 를 주면 CSV 파일로 쓰고, 없으면 표로 보여준다. 표로 볼 때는 ``--max-rows``
+만큼만 받고 멈춘다. 100행을 보여주려고 수백만 행을 받아오면 배치로 나눠 읽어
+메모리를 아끼는 의미가 없다.
 
     pip install impyla pure-sasl thrift-sasl PyYAML
     # "Failed building wheel for pure-sasl" 이 나면
     #     pip install --use-pep517 pure-sasl thrift-sasl
 
-    # 설정 파일에 접속 정보가 있을 때
-    bin/impala-query \
-        --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
-        --output orders.csv
+    # 표로 확인
+    bin/impala-query -f daily_orders.sql --var dt=2026-08-01
 
-    # sql/ 의 템플릿에 변수를 채워 실행
+    # CSV 파일로 저장
     bin/impala-query -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
 
     # 설정을 무시하고 전부 명령행으로
@@ -51,6 +53,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, TextIO
 import appconfig
 import progress
 import sqlfile
+import table
 from progress import PhaseTimer, display_width, pad
 from sqlfile import (  # 다른 스크립트와 공유하는 쿼리 읽기
     load_sql_settings,
@@ -193,7 +196,7 @@ def check_auth_dependencies(auth_mechanism: str) -> None:
 
 
 #: 보고서에 표시할 구간 순서 (실제 실행 흐름대로)
-PHASES = ("Impala 접속", "쿼리 실행 요청", "첫 배치 대기", "데이터 수신", "CSV 쓰기")
+PHASES = ("Impala 접속", "쿼리 실행 요청", "첫 배치 대기", "데이터 수신", "CSV 쓰기", "표 출력")
 
 
 #: impyla에서 LDAP(사용자/비밀번호) 인증을 뜻하는 값
@@ -378,6 +381,40 @@ def make_writer(
     )
 
 
+def show_table(
+    cursor: Any,
+    query: str,
+    timer: PhaseTimer,
+    batch_size: int,
+    max_rows: int,
+    null_string: str,
+    reporter: Optional[progress.Progress] = None,
+) -> None:
+    """쿼리를 실행해 결과를 표로 보여준다.
+
+    보여줄 만큼만 받고 멈춘다. 100행을 보려고 수백만 행을 받아오면 스트리밍으로
+    메모리를 아끼는 의미가 없다.
+    """
+    with timer.measure("쿼리 실행 요청"):
+        cursor.arraysize = batch_size
+        cursor.execute(query)
+
+    columns = [desc[0].split(".")[-1] for desc in (cursor.description or [])]
+
+    with timer.measure("첫 배치 대기"):
+        rows, truncated = table.fetch_limited(
+            cursor,
+            max_rows,
+            batch_size,
+            on_batch=reporter.update if reporter is not None else None,
+        )
+    if reporter is not None:
+        reporter.finish()
+
+    with timer.measure("표 출력"):
+        table.print_result(columns, rows, truncated, null_string or "NULL")
+
+
 def export(
     cursor: Any,
     query: str,
@@ -535,7 +572,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "예시:\n"
-            "  # sql/ 의 템플릿에 변수를 채워 실행\n"
+            "  # sql/ 의 템플릿에 변수를 채워 표로 확인\n"
+            "  bin/impala-query -f daily_orders.sql -V dt=2026-08-01\n"
+            "\n"
+            "  # CSV 파일로 저장\n"
             "  bin/impala-query -f daily_orders.sql -V dt=2026-08-01 -o orders.csv\n"
             "\n"
             "  # 쿼리를 직접 주고 gzip으로 저장\n"
@@ -613,7 +653,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     out = parser.add_argument_group("출력")
-    out.add_argument("-o", "--output", required=True, help="저장할 CSV 경로")
+    out.add_argument(
+        "-o", "--output", help="저장할 CSV 경로 (생략하면 표로 출력)"
+    )
     out.add_argument("--gzip", action="store_true", help="gzip으로 압축해 저장")
     out.add_argument("--delimiter", default="`", help="컬럼 구분자 (기본 `)")
     out.add_argument(
@@ -637,6 +679,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--null-string",
         default="",
         help="NULL을 표시할 문자열 (기본: 빈 값). 예: --null-string '\\N'",
+    )
+    out.add_argument(
+        "--max-rows",
+        type=int,
+        default=table.DEFAULT_MAX_ROWS,
+        help=f"표로 출력할 최대 행 수 (기본 {table.DEFAULT_MAX_ROWS}, 0이면 제한 없음)",
     )
     out.add_argument("--batch-size", type=int, default=50_000, help="fetchmany 크기")
 
@@ -717,6 +765,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 reporter = progress.Progress(
                     "읽는 중", unit="행", enabled=not args.no_progress
                 )
+                if not args.output:
+                    # -o 가 없으면 파일로 쓰지 않고 표로 보여준다
+                    show_table(
+                        cursor,
+                        query,
+                        timer,
+                        batch_size=args.batch_size,
+                        max_rows=args.max_rows,
+                        null_string=args.null_string,
+                        reporter=reporter,
+                    )
+                    return 0
                 with open_output(args.output, args.gzip, args.encoding) as handle:
                     rows = export(
                         cursor,

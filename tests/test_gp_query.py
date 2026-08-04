@@ -257,34 +257,6 @@ ROWS = [
 ]
 
 
-def test_render_table_aligns_columns():
-    lines = g.render_table(COLUMNS, ROWS).splitlines()
-    assert lines[0].startswith("order_dt   | status")
-    assert set(lines[1]) <= {"-", "+"}
-    assert len(lines) == 4
-
-
-def test_render_table_pads_by_display_width():
-    """한글은 두 칸을 차지하므로 그만큼 덜 채워야 열이 맞는다.
-
-    마지막 열은 rstrip 되므로 구분자 위치로 확인한다.
-    """
-    lines = g.render_table(["a", "b"], [("한글", 1), ("ab", 2)]).splitlines()
-    # 문자 개수가 아니라 표시 폭이 같아야 터미널에서 열이 맞는다
-    assert g.display_width(lines[2].split("|")[0]) == g.display_width(
-        lines[3].split("|")[0]
-    )
-
-
-def test_render_table_has_no_trailing_whitespace():
-    for line in g.render_table(COLUMNS, ROWS).splitlines():
-        assert line == line.rstrip()
-
-
-def test_render_table_shows_null():
-    assert "NULL" in g.render_table(COLUMNS, ROWS)
-
-
 def test_select_prints_a_table(capsys):
     cursor = FakeCursor(COLUMNS, ROWS)
     assert g.run(cursor, "SELECT 1", args_for()) == 0
@@ -305,7 +277,8 @@ def test_max_rows_truncates_and_says_so(capsys):
     g.run(cursor, "SELECT 1", args_for(max_rows=3))
     out = capsys.readouterr()
     assert out.out.count("2026-08-01") == 3
-    assert "10행" in out.err and "--max-rows 0" in out.err
+    # 보여줄 만큼만 받으므로 총 개수는 알 수 없다
+    assert "3행 이상" in out.err and "--max-rows 0" in out.err
 
 
 def test_max_rows_zero_shows_everything(capsys):
@@ -313,7 +286,15 @@ def test_max_rows_zero_shows_everything(capsys):
     g.run(FakeCursor(COLUMNS, rows), "SELECT 1", args_for(max_rows=0))
     out = capsys.readouterr()
     assert out.out.count("2026-08-01") == 10
-    assert "--max-rows 0" not in out.err
+    assert "10행" in out.err and "이상" not in out.err
+
+
+def test_table_mode_stops_early(capsys):
+    """100행을 보여주려고 수백만 행을 다 받으면 안 된다."""
+    rows = [(date(2026, 8, 1), "s", i) for i in range(100_000)]
+    cursor = FakeCursor(COLUMNS, rows)
+    g.run(cursor, "SELECT 1", args_for(max_rows=10))
+    assert cursor._offset <= 11
 
 
 # -- 결과가 없는 문장 --------------------------------------------------------------

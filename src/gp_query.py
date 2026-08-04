@@ -37,6 +37,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, TextIO
 import appconfig
 import progress
 import sqlfile
+import table
 from progress import PhaseTimer, display_width, pad
 
 #: 설정의 greenplum 섹션에서 읽어 쓰는 키. 나머지 키는 무시한다.
@@ -59,7 +60,7 @@ PHASES = ("Greenplum 접속", "세션 설정", "쿼리 실행 요청", "결과 �
 FETCH_SIZE = 10_000
 
 #: 표로 보여줄 때 기본으로 출력할 최대 행 수. 0이면 제한 없음.
-DEFAULT_MAX_ROWS = 100
+DEFAULT_MAX_ROWS = table.DEFAULT_MAX_ROWS
 
 
 def import_psycopg2() -> Any:
@@ -154,31 +155,6 @@ def build_connect_kwargs(args: argparse.Namespace, password: Optional[str]) -> D
     return kwargs
 
 
-def format_value(value: Any, null_string: str) -> str:
-    if value is None:
-        return null_string
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
-def render_table(
-    columns: Sequence[str], rows: Sequence[Sequence[Any]], null_string: str = "NULL"
-) -> str:
-    """psql 처럼 열을 맞춰 표로 만든다."""
-    cells = [[format_value(v, null_string) for v in row] for row in rows]
-    widths = [display_width(c) for c in columns]
-    for row in cells:
-        for i, text in enumerate(row):
-            widths[i] = max(widths[i], display_width(text))
-
-    lines = [" | ".join(pad(c, w) for c, w in zip(columns, widths)).rstrip()]
-    lines.append("-+-".join("-" * w for w in widths))
-    for row in cells:
-        lines.append(" | ".join(pad(t, w) for t, w in zip(row, widths)).rstrip())
-    return "\n".join(lines)
-
-
 @contextlib.contextmanager
 def open_output(path: str, use_gzip: bool, encoding: str) -> Iterator[TextIO]:
     """CSV 출력 파일을 연다.
@@ -264,43 +240,42 @@ def run(
         return 0
 
     columns = column_names(cursor.description)
+    reporter = progress.Progress("받는 중", unit="행", enabled=show_progress)
+
+    if args.output:
+        # 파일로 받을 때는 끝까지 받아야 한다
+        with timer.measure("결과 수신"):
+            rows = fetch_rows(cursor, reporter)
+        with timer.measure("결과 출력"):
+            return write_output(columns, rows, args)
+
+    # 표로 볼 때는 보여줄 만큼만 받는다. 100행을 보려고 수백만 행을 받지 않는다.
     with timer.measure("결과 수신"):
-        rows = fetch_rows(
-            cursor,
-            progress.Progress("받는 중", unit="행", enabled=show_progress),
+        rows, truncated = table.fetch_limited(
+            cursor, args.max_rows, FETCH_SIZE, on_batch=reporter.update
         )
+        reporter.finish()
 
     with timer.measure("결과 출력"):
-        return emit(columns, rows, args)
+        table.print_result(columns, rows, truncated, args.null_string or "NULL")
+    return 0
 
 
-def emit(columns: Sequence[str], rows: Sequence[Sequence[Any]], args: argparse.Namespace) -> int:
-    """받은 결과를 표나 CSV로 내보낸다."""
-    if args.output:
-        with open_output(args.output, args.gzip, args.encoding) as handle:
-            written = write_csv(
-                handle,
-                columns,
-                rows,
-                delimiter=args.delimiter,
-                null_string=args.null_string,
-                write_header=not args.no_header,
-            )
-        size = os.path.getsize(args.output)
-        print(f"{args.output}  {progress.human_bytes(size)}  {written:,}행", file=sys.stderr)
-        return 0
-
-    shown = rows if args.max_rows <= 0 else rows[: args.max_rows]
-    if rows:
-        print(render_table(columns, shown, args.null_string or "NULL"))
-    else:
-        print(" | ".join(columns))
-        print("(0행)")
-
-    note = f"{len(rows):,}행"
-    if len(shown) < len(rows):
-        note += f" (앞 {len(shown):,}행만 표시 — 전부 보려면 --max-rows 0)"
-    print(note, file=sys.stderr)
+def write_output(
+    columns: Sequence[str], rows: Sequence[Sequence[Any]], args: argparse.Namespace
+) -> int:
+    """받은 결과를 CSV 파일로 쓴다."""
+    with open_output(args.output, args.gzip, args.encoding) as handle:
+        written = write_csv(
+            handle,
+            columns,
+            rows,
+            delimiter=args.delimiter,
+            null_string=args.null_string,
+            write_header=not args.no_header,
+        )
+    size = os.path.getsize(args.output)
+    print(f"{args.output}  {progress.human_bytes(size)}  {written:,}행", file=sys.stderr)
     return 0
 
 

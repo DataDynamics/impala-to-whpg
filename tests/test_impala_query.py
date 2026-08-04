@@ -597,6 +597,7 @@ def test_script_has_no_unexpected_dependency():
         "appconfig",  # 같은 디렉터리의 설정 로더. PyYAML은 그쪽에서 지연 임포트한다.
         "sqlfile",    # 같은 디렉터리의 쿼리 로더. Jinja2는 그쪽에서 지연 임포트한다.
         "progress",   # 같은 디렉터리의 소요 시간·진행 상황 보고
+        "table",      # 같은 디렉터리의 표 출력
     }
     assert modules <= stdlib | third_party, (
         f"허용되지 않은 의존성: {modules - stdlib - third_party}"
@@ -875,6 +876,52 @@ def test_missing_user_is_reported(tmp_path):
 def test_nosasl_does_not_need_a_user(tmp_path):
     args = parsed(tmp_path, "impala:\n  host: h\n", ["--auth-mechanism", "NOSASL"])
     assert args.user is None
+
+
+# -- 표로 보여주기 (-o 없이) -------------------------------------------------------
+
+
+def test_output_is_optional():
+    """-o 없이도 파싱된다. 예전에는 required 였다."""
+    args = q.build_parser().parse_args(["-q", "SELECT 1"])
+    assert args.output is None
+
+
+def test_show_table_prints_to_stdout(capsys):
+    cursor = FakeCursor(COLUMNS, ROWS)
+    q.show_table(cursor, "SELECT 1", q.PhaseTimer(), batch_size=10, max_rows=100,
+                 null_string="")
+    captured = capsys.readouterr()
+    assert "order_id" in captured.out and "김철수" in captured.out
+    assert "3행" in captured.err
+
+
+def test_show_table_stops_early(capsys):
+    """표로 볼 때는 보여줄 만큼만 받는다. 스트리밍의 의미를 지킨다."""
+    rows = [(i, f"n{i}", Decimal("1"), date(2026, 8, 1)) for i in range(100_000)]
+    cursor = FakeCursor(COLUMNS, rows)
+    q.show_table(cursor, "SELECT 1", q.PhaseTimer(), batch_size=1000, max_rows=10,
+                 null_string="")
+
+    assert cursor._offset <= 11
+    assert "10행 이상" in capsys.readouterr().err
+
+
+def test_show_table_max_rows_zero_reads_everything(capsys):
+    rows = [(i, f"n{i}", Decimal("1"), date(2026, 8, 1)) for i in range(250)]
+    cursor = FakeCursor(COLUMNS, rows)
+    q.show_table(cursor, "SELECT 1", q.PhaseTimer(), batch_size=64, max_rows=0,
+                 null_string="")
+    err = capsys.readouterr().err
+    assert "250행" in err and "이상" not in err
+
+
+def test_show_table_records_phases():
+    timer = q.PhaseTimer(q.PHASES)
+    q.show_table(FakeCursor(COLUMNS, ROWS), "SELECT 1", timer, batch_size=10,
+                 max_rows=100, null_string="")
+    report = timer.report()
+    assert "쿼리 실행 요청" in report and "표 출력" in report
 
 
 # -- 인자 없이 실행 ---------------------------------------------------------------
