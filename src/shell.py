@@ -48,7 +48,7 @@ KEYWORDS = (
 #: 자동완성에 쓸 메타 명령 목록
 META_NAMES = (
     "\\q", "\\?", "\\i", "\\set", "\\unset", "\\o", "\\timing", "\\x",
-    "\\dt", "\\d", "\\e", "\\paste", "\\pager", "\\begin", "\\commit", "\\rollback",
+    "\\dt", "\\d", "\\ddl", "\\e", "\\paste", "\\pager", "\\begin", "\\commit", "\\rollback",
     ":paste",        # spark-shell 습관대로 치는 사람을 위해 이것도 완성한다
 )
 
@@ -67,6 +67,8 @@ class Engine:
         list_tables_sql: Optional[Callable[[Optional[str]], str]] = None,
         describe_sql: Optional[Callable[[str], str]] = None,
         table_names_sql: Optional[Callable[[], str]] = None,
+        ddl_sql: Optional[Callable[[str], str]] = None,
+        describe_extra_sql: Optional[Callable[[str], str]] = None,
     ) -> None:
         self.name = name                      # "Impala" / "Greenplum"
         self.label = label                    # 프롬프트에 쓸 대상 이름
@@ -77,6 +79,8 @@ class Engine:
         self.list_tables_sql = list_tables_sql
         self.describe_sql = describe_sql
         self.table_names_sql = table_names_sql
+        self.ddl_sql = ddl_sql
+        self.describe_extra_sql = describe_extra_sql
 
     def cancel(self, conn: Any, cursor: Any) -> bool:
         """실행 중인 문장을 서버에 취소 요청한다. 되면 True."""
@@ -445,6 +449,8 @@ class Shell:
             print(f"세로 출력: {'켬' if self.vertical else '끔'}", file=sys.stderr)
         elif name in ("\\dt", "\\d"):
             self.catalog(name, rest[0] if rest else None)
+        elif name == "\\ddl":
+            self.ddl(rest[0] if rest else None)
         elif name == "\\e":
             self.edit()
         elif name in ("\\paste", ":paste"):
@@ -479,6 +485,37 @@ class Shell:
         finally:
             cursor.close()
 
+    def run_text_sql(self, sql: str) -> None:
+        """결과를 표가 아니라 원문 그대로 낸다.
+
+        CREATE TABLE 문처럼 그 자체가 여러 줄인 값은 표에 넣으면 오히려 읽기
+        어렵다. 복사해서 바로 쓸 수 있어야 한다.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(sql)
+            if cursor.description is None:
+                return
+            lines = [str(row[0]) for row in cursor.fetchall() if row and row[0] is not None]
+        finally:
+            cursor.close()
+        if lines:
+            self.page("\n".join(lines))
+
+    def ddl(self, target: Optional[str]) -> None:
+        """``\\ddl 이름`` — 테이블 생성문을 보여준다."""
+        if not target:
+            print("사용법: \\ddl 테이블이름", file=sys.stderr)
+            return
+        if self.engine.ddl_sql is None:
+            print(f"{self.engine.name} 에서는 지원하지 않습니다.", file=sys.stderr)
+            return
+        try:
+            self.run_text_sql(self.engine.ddl_sql(target))
+        except Exception as exc:
+            print(f"오류: {type(exc).__name__}: {exc}", file=sys.stderr)
+            self._recover()
+
     def catalog(self, name: str, target: Optional[str]) -> None:
         """``\\dt`` 테이블 목록, ``\\d 이름`` 컬럼 정보.
 
@@ -499,6 +536,9 @@ class Shell:
         print(f"-- {label}", file=sys.stderr)
         try:
             self.run_sql(maker(target))
+            # 분산키처럼 컬럼 목록에 안 들어가는 정보를 뒤에 덧붙인다
+            if name == "\\d" and target and self.engine.describe_extra_sql is not None:
+                self.run_text_sql(self.engine.describe_extra_sql(target))
         except Exception as exc:
             print(f"오류: {type(exc).__name__}: {exc}", file=sys.stderr)
             self._recover()
@@ -677,7 +717,8 @@ HELP = """\
   \\timing            문장별 소요 시간 표시 켜기/끄기
   \\x                 세로 출력 켜기/끄기 (컬럼이 많을 때)
   \\dt [패턴]         테이블 목록
-  \\d 이름            컬럼 정보
+  \\d 이름            컬럼 정보 (Greenplum 은 분산키도)
+  \\ddl 이름          테이블 생성문 (CREATE TABLE)
   \\e                 $EDITOR 로 편집한 뒤 실행
   \\paste (:paste)    긴 쿼리 붙여넣기. Ctrl-D 또는 \\. 로 끝냅니다.
   \\pager auto|on|off  긴 결과를 페이저로 넘길지

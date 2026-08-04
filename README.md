@@ -240,6 +240,7 @@ bin/gp-shell [접속옵션]          # bin/gp-query --interactive 와 같습니�
 | `\timing` | 문장별 소요 시간 표시 켜기·끄기 |
 | `\x` | 세로 출력 켜기·끄기 (컬럼이 많을 때) |
 | `\dt [패턴]` / `\d 이름` | 테이블 목록 / 컬럼 정보 |
+| `\ddl 이름` | 테이블 생성문 (`CREATE TABLE`) |
 | `\e` | `$EDITOR` 로 편집한 뒤 실행 |
 | `\paste` (`:paste`) | 긴 쿼리를 통째로 붙여넣기 |
 | `\pager auto\|on\|off` | 긴 결과를 페이저로 넘길지 |
@@ -563,6 +564,39 @@ status   | 결제완료
 
 `$$ ... $$` 인용도 통째로 넘깁니다. 함수 본문의 세미콜론을 문장 끝으로 세지
 않으므로 `CREATE FUNCTION` 을 그대로 붙여 넣을 수 있습니다.
+
+### 테이블 살펴보기
+
+```
+dw=> \dt                       테이블 목록
+dw=> \d staging.orders         컬럼 정보 + 분산키
+dw=> \ddl staging.orders       생성문
+```
+
+`\d` 는 컬럼·타입·NULL 여부·기본값을 표로 보여주고, Greenplum 이면 **분산키를
+덧붙입니다.** 컬럼 목록에는 안 나오지만 Greenplum 에서 가장 먼저 확인할 값입니다.
+
+`\ddl` 은 생성문을 표가 아니라 **원문 그대로** 냅니다. 복사해서 바로 쓸 수 있습니다.
+
+```sql
+CREATE TABLE staging.orders (
+    order_id bigint NOT NULL,
+    order_dt date,
+    amount numeric(18,2)
+)
+WITH (appendonly=true, orientation=column, compresstype=zstd)
+DISTRIBUTED BY (order_id);
+```
+
+Impala 는 `SHOW CREATE TABLE` 을 그대로 씁니다. **Greenplum 에는 그런 명령이 없어서
+카탈로그에서 조립합니다** — 컬럼, `NOT NULL`, 기본값, 저장 옵션, 분산키까지 맞춥니다.
+
+**제약조건·인덱스·파티션은 넣지 않습니다.** 그것까지 정확히 뽑으려면 `pg_dump` 를
+쓰는 편이 낫고, 어설프게 흉내내면 맞는 줄 알고 쓰다가 어긋납니다.
+
+```bash
+pg_dump -h gp.example.com -d dw -s -t staging.orders
+```
 
 ### 자동완성
 

@@ -575,6 +575,10 @@ def make_engine(args: argparse.Namespace, dbapi: Any, password: Optional[str]) -
     def describe_sql(target: str) -> str:
         return f"DESCRIBE {target}"
 
+    def ddl_sql(target: str) -> str:
+        # Impala 는 생성문을 그대로 돌려준다. 조립할 필요가 없다.
+        return f"SHOW CREATE TABLE {target}"
+
     def table_names_sql() -> str:
         # SHOW TABLES 는 현재 데이터베이스의 이름만 준다
         return "SHOW TABLES"
@@ -588,6 +592,7 @@ def make_engine(args: argparse.Namespace, dbapi: Any, password: Optional[str]) -
         list_tables_sql=list_tables_sql,
         describe_sql=describe_sql,
         table_names_sql=table_names_sql,
+        ddl_sql=ddl_sql,
     )
 
 

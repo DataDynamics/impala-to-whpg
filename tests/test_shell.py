@@ -109,6 +109,8 @@ def make_shell(transactional=True, **overrides):
         ),
         describe_sql=lambda target: f"DESCRIBE {target}",
         table_names_sql=lambda: "SHOW TABLES",
+        ddl_sql=lambda target: f"SHOW CREATE TABLE {target}",
+        describe_extra_sql=lambda target: f"DISTKEY {target}",
     )
     options = dict(var=[], max_rows=100, sql_dir=None)
     options.update(overrides)
@@ -506,7 +508,7 @@ def test_d_describes_a_table(capsys):
     s, conn = make_shell()
     conn.result = (["name", "type"], [("order_id", "bigint")], -1)
     s.feed("\\d orders")
-    assert conn.executed == ["DESCRIBE orders"]
+    assert conn.executed[0] == "DESCRIBE orders"
     assert "order_id" in capsys.readouterr().out
 
 
@@ -747,7 +749,7 @@ def test_paste_is_listed_in_help(capsys):
 
 def test_completes_meta_commands():
     s, _ = make_shell()
-    assert s.candidates("\\d") == ["\\d", "\\dt"]
+    assert s.candidates("\\d") == ["\\d", "\\ddl", "\\dt"]
     assert "\\paste" in s.candidates("\\p")
 
 
@@ -935,3 +937,89 @@ def test_pager_is_not_used_for_file_output(tmp_path, monkeypatch):
     monkeypatch.setattr(sh.subprocess, "Popen", lambda *a, **k: pytest.fail("페이저 금지"))
     s.feed(f"\\o {tmp_path / 'out.csv'}")
     s.feed("SELECT 1;")
+
+
+# -- \\ddl / 스키마 ----------------------------------------------------------------
+
+
+DDL = "CREATE TABLE staging.orders (\n    order_id bigint\n)\nDISTRIBUTED BY (order_id);"
+
+
+def test_ddl_prints_the_statement_raw(capsys):
+    """생성문은 그 자체가 여러 줄이라 표에 넣으면 읽기 어렵다."""
+    s, conn = make_shell()
+    conn.result = (["ddl"], [(DDL,)], -1)
+    s.feed("\\ddl staging.orders")
+
+    out = capsys.readouterr().out
+    assert out.strip() == DDL
+    assert "|" not in out.splitlines()[0]      # 표 테두리가 없다
+
+
+def test_ddl_asks_the_engine_for_sql():
+    s, conn = make_shell()
+    conn.result = (["ddl"], [(DDL,)], -1)
+    s.feed("\\ddl staging.orders")
+    assert conn.executed == ["SHOW CREATE TABLE staging.orders"]
+
+
+def test_ddl_without_a_name_is_reported(capsys):
+    s, conn = make_shell()
+    s.feed("\\ddl")
+    assert conn.executed == []
+    assert "사용법" in capsys.readouterr().err
+
+
+def test_ddl_unsupported_engine_is_reported(capsys):
+    conn = FakeConnection()
+    engine = sh.Engine("Something", "x", lambda: conn)
+    s = sh.Shell(engine, argparse.Namespace(var=[], max_rows=100, sql_dir=None))
+    s.conn = conn
+    s.interactive = False
+    s.feed("\\ddl t")
+    assert "지원하지 않습니다" in capsys.readouterr().err
+
+
+def test_ddl_error_does_not_end_the_shell(capsys):
+    s, conn = make_shell()
+    conn.fail_on = "SHOW CREATE TABLE"
+    assert s.feed("\\ddl t") is True
+    assert "오류" in capsys.readouterr().err
+
+
+def test_describe_adds_extra_info(capsys):
+    """분산키는 컬럼 목록에 안 나온다. Greenplum 에서 가장 먼저 볼 값이다."""
+    s, conn = make_shell()
+    conn.result = (["name"], [("분산키: DISTRIBUTED BY (order_id)",)], -1)
+    s.feed("\\d orders")
+    assert conn.executed == ["DESCRIBE orders", "DISTKEY orders"]
+    assert "분산키" in capsys.readouterr().out
+
+
+def test_describe_without_extra_support():
+    conn = FakeConnection()
+    engine = sh.Engine("Impala", "x", lambda: conn,
+                       describe_sql=lambda t: f"DESCRIBE {t}")
+    s = sh.Shell(engine, argparse.Namespace(var=[], max_rows=100, sql_dir=None))
+    s.conn = conn
+    s.interactive = False
+    s.feed("\\d orders")
+    assert conn.executed == ["DESCRIBE orders"]
+
+
+def test_dt_does_not_run_the_extra_query():
+    s, conn = make_shell()
+    s.feed("\\dt")
+    assert conn.executed == ["SHOW TABLES"]
+
+
+def test_run_text_sql_skips_null_rows(capsys):
+    s, conn = make_shell()
+    conn.result = (["x"], [("첫 줄",), (None,), ("셋째 줄",)], -1)
+    s.run_text_sql("SELECT 1")
+    assert capsys.readouterr().out.splitlines() == ["첫 줄", "셋째 줄"]
+
+
+def test_ddl_is_completed():
+    s, _ = make_shell()
+    assert "\\ddl" in s.candidates("\\dd")

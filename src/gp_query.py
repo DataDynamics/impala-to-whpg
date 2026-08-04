@@ -298,6 +298,52 @@ def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]
             "ORDER BY 1"
         )
 
+    def _target_where(target: str, alias: str = "c") -> str:
+        """``schema.table`` 을 카탈로그 조회 조건으로 바꾼다."""
+        schema, _, name = target.rpartition(".")
+        where = f"{alias}.relname = {quote_literal(name)}"
+        if schema:
+            where += f" AND n.nspname = {quote_literal(schema)}"
+        return where
+
+    def describe_extra_sql(target: str) -> str:
+        # 분산키는 컬럼 목록에 안 나온다. Greenplum 에서 가장 먼저 확인할 값이다.
+        return (
+            "SELECT '분산키: ' || pg_get_table_distributedby(c.oid) "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            f"WHERE {_target_where(target)}"
+        )
+
+    def ddl_sql(target: str) -> str:
+        """카탈로그에서 CREATE TABLE 문을 조립한다.
+
+        Greenplum 에는 SHOW CREATE TABLE 이 없다. 컬럼, NOT NULL, 기본값, 저장
+        옵션(appendonly 등), 분산키까지 맞춘다.
+
+        제약조건·인덱스·파티션은 넣지 않는다. 그것까지 정확히 뽑으려면 pg_dump 를
+        쓰는 편이 낫고, 어설프게 흉내내면 맞는 줄 알고 쓰다가 어긋난다.
+        """
+        # 원시 문자열이어야 E'\n' 이 파이썬이 아니라 서버에서 해석된다
+        return rf"""
+SELECT 'CREATE TABLE ' || n.nspname || '.' || c.relname || E' (\n'
+    || string_agg(
+           '    ' || quote_ident(a.attname) || ' ' || format_type(a.atttypid, a.atttypmod)
+           || CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END
+           || CASE WHEN ad.adbin IS NOT NULL
+                   THEN ' DEFAULT ' || pg_get_expr(ad.adbin, ad.adrelid) ELSE '' END,
+           E',\n' ORDER BY a.attnum)
+    || E'\n)'
+    || CASE WHEN c.reloptions IS NOT NULL
+            THEN E'\nWITH (' || array_to_string(c.reloptions, ', ') || ')' ELSE '' END
+    || E'\n' || pg_get_table_distributedby(c.oid) || ';'
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+  LEFT JOIN pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
+ WHERE {_target_where(target)}
+ GROUP BY n.nspname, c.relname, c.oid, c.reloptions
+""".strip()
+
     return shell.Engine(
         name="Greenplum",
         label=args.database,
@@ -308,6 +354,8 @@ def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]
         list_tables_sql=list_tables_sql,
         describe_sql=describe_sql,
         table_names_sql=table_names_sql,
+        ddl_sql=ddl_sql,
+        describe_extra_sql=describe_extra_sql,
     )
 
 
