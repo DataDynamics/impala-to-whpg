@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import threading
 from datetime import date
 from pathlib import Path
 from typing import Any, List
@@ -24,6 +25,9 @@ class FakeCursor:
 
     def execute(self, sql: str) -> None:
         self.conn.executed.append(sql)
+        if self.conn.block is not None:
+            # 오래 걸리는 문장 흉내. cancel() 이 풀어준다.
+            self.conn.block.wait(2)
         if self.conn.fail_on and self.conn.fail_on in sql:
             raise RuntimeError("문법 오류")
         columns, rows, rowcount = self.conn.result_for(sql)
@@ -47,6 +51,8 @@ class FakeConnection:
         self.autocommit = False
         self.closed = False
         self.rolled_back = 0
+        self.cancelled = 0
+        self.block = None
         self.fail_on: str = ""
         self.result = ([], [], -1)      # (columns, rows, rowcount)
 
@@ -57,6 +63,11 @@ class FakeConnection:
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
+
+    def cancel(self) -> None:
+        self.cancelled += 1
+        if self.block is not None:
+            self.block.set()
 
     def rollback(self) -> None:
         self.rolled_back += 1
@@ -86,6 +97,11 @@ def make_shell(transactional=True, **overrides):
         connect=lambda: conn,
         transactional=transactional,
         enable_autocommit=(lambda c: setattr(c, "autocommit", True)) if transactional else None,
+        cancel=lambda conn, cursor: conn.cancel(),
+        list_tables_sql=lambda pattern: (
+            f"SHOW TABLES LIKE '{pattern}'" if pattern else "SHOW TABLES"
+        ),
+        describe_sql=lambda target: f"DESCRIBE {target}",
     )
     options = dict(var=[], max_rows=100, sql_dir=None)
     options.update(overrides)
@@ -394,3 +410,326 @@ def test_csv_output_takes_everything(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# -- 달러 인용 ---------------------------------------------------------------------
+
+
+FUNCTION = """CREATE FUNCTION f() RETURNS int AS $$
+BEGIN
+  SELECT 1; SELECT 2;
+  RETURN 3;
+END;
+$$ LANGUAGE plpgsql;"""
+
+
+def test_dollar_quoted_body_stays_one_statement():
+    """함수 본문의 세미콜론을 문장 끝으로 세면 CREATE FUNCTION 이 잘린다."""
+    statements, rest = sh.split_statements(FUNCTION)
+    assert len(statements) == 1
+    assert "RETURN 3" in statements[0]
+    assert rest.strip() == ""
+
+
+def test_dollar_quoted_body_then_another_statement():
+    statements, _ = sh.split_statements(FUNCTION + "\nSELECT 9;")
+    assert len(statements) == 2
+    assert statements[1] == "SELECT 9"
+
+
+def test_tagged_dollar_quote():
+    statements, _ = sh.split_statements("SELECT $tag$ a; b $tag$ FROM t;")
+    assert len(statements) == 1
+
+
+def test_unclosed_dollar_quote_stays_incomplete():
+    statements, rest = sh.split_statements("CREATE FUNCTION f() AS $$ SELECT 1;")
+    assert statements == []
+    assert rest.strip().startswith("CREATE FUNCTION")
+
+
+def test_dollar_sign_that_is_not_a_quote():
+    """$1 같은 자리표시자는 인용이 아니다."""
+    statements, _ = sh.split_statements("SELECT $1 FROM t;")
+    assert statements == ["SELECT $1 FROM t"]
+
+
+# -- 세로 출력 ---------------------------------------------------------------------
+
+
+def test_vertical_toggle(capsys):
+    s, conn = make_shell()
+    conn.result = (["a", "b"], [(1, "x")], -1)
+    s.feed("\\x")
+    assert s.vertical is True
+    s.feed("SELECT 1;")
+    out = capsys.readouterr().out
+    assert "RECORD 1" in out
+    assert "a | 1" in out
+
+
+def test_vertical_off_returns_to_table(capsys):
+    s, conn = make_shell()
+    conn.result = (["a"], [(1,)], -1)
+    s.feed("\\x")
+    s.feed("\\x")
+    assert s.vertical is False
+    s.feed("SELECT 1;")
+    assert "RECORD" not in capsys.readouterr().out
+
+
+# -- 카탈로그 ---------------------------------------------------------------------
+
+
+def test_dt_lists_tables(capsys):
+    s, conn = make_shell()
+    conn.result = (["table"], [("orders",)], -1)
+    s.feed("\\dt")
+    assert conn.executed == ["SHOW TABLES"]
+    assert "orders" in capsys.readouterr().out
+
+
+def test_dt_with_a_pattern(capsys):
+    s, conn = make_shell()
+    s.feed("\\dt order%")
+    assert conn.executed == ["SHOW TABLES LIKE 'order%'"]
+
+
+def test_d_describes_a_table(capsys):
+    s, conn = make_shell()
+    conn.result = (["name", "type"], [("order_id", "bigint")], -1)
+    s.feed("\\d orders")
+    assert conn.executed == ["DESCRIBE orders"]
+    assert "order_id" in capsys.readouterr().out
+
+
+def test_d_without_a_name_lists_tables(capsys):
+    s, conn = make_shell()
+    s.feed("\\d")
+    assert conn.executed == ["SHOW TABLES"]
+
+
+def test_catalog_error_does_not_end_the_shell(capsys):
+    s, conn = make_shell()
+    conn.fail_on = "SHOW TABLES"
+    assert s.feed("\\dt") is True
+    assert "오류" in capsys.readouterr().err
+
+
+def test_catalog_unsupported_is_reported(capsys):
+    conn = FakeConnection()
+    engine = sh.Engine("Something", "x", lambda: conn)
+    s = sh.Shell(engine, argparse.Namespace(var=[], max_rows=100, sql_dir=None))
+    s.conn = conn
+    s.interactive = False
+    s.feed("\\dt")
+    assert "지원하지 않습니다" in capsys.readouterr().err
+
+
+# -- 취소 -------------------------------------------------------------------------
+
+
+def interrupt_on_wait(monkeypatch):
+    """메인이 스레드를 기다리는 첫 순간에 Ctrl-C 가 들어온 상황을 만든다."""
+    real_join = threading.Thread.join
+    fired = {"done": False}
+
+    def fake_join(self, timeout=None):
+        if timeout is not None and not fired["done"]:
+            fired["done"] = True
+            raise KeyboardInterrupt
+        return real_join(self) if timeout is None else real_join(self, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", fake_join)
+
+
+def test_cancel_asks_the_server_and_keeps_the_shell(capsys, monkeypatch):
+    """Ctrl-C 는 실행 중인 문장만 취소하고 셸은 살아 있어야 한다."""
+    s, conn = make_shell()
+    conn.block = threading.Event()      # 문장이 매달려 있다
+    interrupt_on_wait(monkeypatch)
+
+    assert s.feed("SELECT pg_sleep(60);") is True
+
+    assert conn.cancelled == 1          # 서버에 취소를 요청했다
+    assert conn.rolled_back == 1        # 실패한 트랜잭션을 정리했다
+    err = capsys.readouterr().err
+    assert "취소하는 중" in err and "취소했습니다" in err
+
+
+def test_cancelled_statement_prints_no_result(capsys, monkeypatch):
+    s, conn = make_shell()
+    conn.block = threading.Event()
+    conn.result = (["a"], [(1,)], -1)
+    interrupt_on_wait(monkeypatch)
+
+    s.feed("SELECT 1;")
+    assert capsys.readouterr().out == ""
+
+
+def test_engine_without_cancel_says_so(capsys, monkeypatch):
+    conn = FakeConnection()
+    conn.block = threading.Event()
+    engine = sh.Engine("Something", "x", lambda: conn)
+    s = sh.Shell(engine, argparse.Namespace(var=[], max_rows=100, sql_dir=None))
+    s.conn = conn
+    s.interactive = False
+    interrupt_on_wait(monkeypatch)
+    # 취소할 방법이 없으니 문장이 스스로 끝날 때까지 기다린다
+    threading.Timer(0.05, conn.block.set).start()
+
+    s.feed("SELECT 1;")
+    assert "취소를 지원하지 않습니다" in capsys.readouterr().err
+
+
+def test_statement_runs_in_a_thread():
+    """드라이버가 GIL 을 놓기 때문에 별도 스레드가 아니면 Ctrl-C 가 먹지 않는다."""
+    s, conn = make_shell()
+    seen = {}
+
+    class Recording(FakeCursor):
+        def execute(self, sql):
+            seen["thread"] = sh.threading.current_thread().name
+            super().execute(sql)
+
+    conn.cursor = lambda: Recording(conn)
+    s.feed("SELECT 1;")
+    assert seen["thread"] != sh.threading.main_thread().name
+
+
+# -- \e ---------------------------------------------------------------------------
+
+
+def test_edit_runs_what_was_saved(tmp_path, monkeypatch, capsys):
+    s, conn = make_shell()
+
+    def fake_editor(argv):
+        with open(argv[1], "w", encoding="utf-8") as fp:
+            fp.write("SELECT 42;")
+        return 0
+
+    monkeypatch.setenv("EDITOR", "fake")
+    monkeypatch.setattr("subprocess.call", fake_editor)
+    s.feed("\\e")
+    assert conn.executed == ["SELECT 42"]
+
+
+def test_edit_without_an_editor_is_reported(monkeypatch, capsys):
+    s, _ = make_shell()
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+    s.feed("\\e")
+    assert "EDITOR" in capsys.readouterr().err
+
+
+def test_edit_accepts_input_without_a_semicolon(monkeypatch):
+    s, conn = make_shell()
+
+    def fake_editor(argv):
+        with open(argv[1], "w", encoding="utf-8") as fp:
+            fp.write("SELECT 7")
+        return 0
+
+    monkeypatch.setenv("EDITOR", "fake")
+    monkeypatch.setattr("subprocess.call", fake_editor)
+    s.feed("\\e")
+    assert conn.executed == ["SELECT 7"]
+
+
+# -- \\paste ----------------------------------------------------------------------
+
+
+def test_paste_runs_a_block_without_a_trailing_semicolon(monkeypatch):
+    """붙여넣는 글에는 세미콜론이 없을 때가 많다."""
+    s, conn = make_shell()
+    feed_lines(monkeypatch, ["SELECT", "  order_id", "FROM orders"])
+    s.feed("\\paste")
+    assert conn.executed == ["SELECT\n  order_id\nFROM orders"]
+
+
+def test_paste_accepts_the_spark_shell_spelling(monkeypatch):
+    s, conn = make_shell()
+    feed_lines(monkeypatch, ["SELECT 1"])
+    s.feed(":paste")
+    assert conn.executed == ["SELECT 1"]
+
+
+def test_paste_splits_multiple_statements(monkeypatch):
+    s, conn = make_shell()
+    feed_lines(monkeypatch, ["SELECT 1;", "SELECT 2;", "SELECT 3"])
+    s.feed("\\paste")
+    assert conn.executed == ["SELECT 1", "SELECT 2", "SELECT 3"]
+
+
+def test_paste_does_not_treat_backslash_lines_as_meta(monkeypatch):
+    """붙여넣은 글에 \\ 로 시작하는 줄이 있어도 명령으로 잡히면 안 된다."""
+    s, conn = make_shell()
+    feed_lines(monkeypatch, [r"SELECT '\q' AS x", r"FROM t"])
+    s.feed("\\paste")
+    assert conn.executed == [r"SELECT '\q' AS x" + "\nFROM t"]
+
+
+def test_paste_ends_on_the_dot_terminator(monkeypatch):
+    s, conn = make_shell()
+    feed_lines(monkeypatch, ["SELECT 1", "\\.", "SELECT 2"])
+    s.feed("\\paste")
+    assert conn.executed == ["SELECT 1"]
+
+
+def test_paste_keeps_dollar_quoted_bodies_together(monkeypatch):
+    s, conn = make_shell()
+    feed_lines(monkeypatch, FUNCTION.splitlines())
+    s.feed("\\paste")
+    assert len(conn.executed) == 1
+    assert "SELECT 1; SELECT 2;" in conn.executed[0]
+
+
+def test_paste_applies_template_variables(monkeypatch):
+    s, conn = make_shell()
+    s.feed("\\set dt 2026-08-01")
+    feed_lines(monkeypatch, ["SELECT '{{ dt }}'"])
+    s.feed("\\paste")
+    assert conn.executed == ["SELECT '2026-08-01'"]
+
+
+def test_paste_of_nothing_is_reported(monkeypatch, capsys):
+    s, conn = make_shell()
+    feed_lines(monkeypatch, [])
+    s.feed("\\paste")
+    assert conn.executed == []
+    assert "내용이 없습니다" in capsys.readouterr().err
+
+
+def test_paste_inside_a_statement_is_literal_text():
+    """문장을 쓰는 중이면 \\q 와 마찬가지로 명령이 아니라 SQL 이다."""
+    s, conn = make_shell()
+    s.feed("SELECT")
+    s.feed("  '\\paste' FROM t;")
+    assert conn.executed == ["SELECT\n  '\\paste' FROM t"]
+
+
+def test_paste_survives_a_failing_statement(monkeypatch, capsys):
+    s, conn = make_shell()
+    conn.fail_on = "BROKEN"
+    feed_lines(monkeypatch, ["BROKEN;", "SELECT 2;"])
+    assert s.feed("\\paste") is True
+    assert conn.executed == ["BROKEN", "SELECT 2"]
+    assert "오류" in capsys.readouterr().err
+
+
+def test_paste_cancelled_by_ctrl_c(monkeypatch, capsys):
+    s, conn = make_shell()
+
+    def fake_input(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    s.feed("\\paste")
+    assert conn.executed == []
+    assert "붙여넣기를 취소했습니다" in capsys.readouterr().err
+
+
+def test_paste_is_listed_in_help(capsys):
+    s, _ = make_shell()
+    s.feed("\\?")
+    assert "\\paste" in capsys.readouterr().out

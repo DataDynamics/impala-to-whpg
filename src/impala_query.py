@@ -565,9 +565,24 @@ def make_engine(args: argparse.Namespace, dbapi: Any, password: Optional[str]) -
                 cursor.close()
         return conn
 
+    def cancel(conn: Any, cursor: Any) -> None:
+        # impyla 커서는 진행 중인 작업을 서버에 취소 요청할 수 있다
+        cursor.cancel_operation()
+
+    def list_tables_sql(pattern: Optional[str]) -> str:
+        return f"SHOW TABLES LIKE '{pattern}'" if pattern else "SHOW TABLES"
+
+    def describe_sql(target: str) -> str:
+        return f"DESCRIBE {target}"
+
     # Impala 에는 트랜잭션이 없다. autocommit 을 켜고 말고 할 것이 없다.
     return shell.Engine(
-        name="Impala", label=args.database or "impala", connect=connect
+        name="Impala",
+        label=args.database or "impala",
+        connect=connect,
+        cancel=cancel,
+        list_tables_sql=list_tables_sql,
+        describe_sql=describe_sql,
     )
 
 

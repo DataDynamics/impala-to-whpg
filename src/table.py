@@ -79,6 +79,7 @@ def print_result(
     truncated: bool,
     null_string: str = "NULL",
     stream: Optional[TextIO] = None,
+    vertical: bool = False,
 ) -> None:
     """표를 stdout 으로, 행 수 요약을 stderr 로 낸다.
 
@@ -87,7 +88,8 @@ def print_result(
     """
     out = stream or sys.stdout
     if rows:
-        print(render(columns, rows, null_string), file=out)
+        draw = render_vertical if vertical else render
+        print(draw(columns, rows, null_string), file=out)
     else:
         print(" | ".join(columns), file=out)
         print("(0행)", file=out)
@@ -100,6 +102,20 @@ def print_result(
         )
     else:
         print(f"{len(rows):,}행", file=sys.stderr)
+
+
+def render_vertical(
+    columns: Sequence[str], rows: Sequence[Sequence[Any]], null_string: str = "NULL"
+) -> str:
+    """한 행을 여러 줄로 편다. 컬럼이 많아 가로로 넘칠 때 쓴다(psql 의 \\x)."""
+    width = max((display_width(c) for c in columns), default=0)
+    blocks = []
+    for index, row in enumerate(rows, 1):
+        header = f"-[ RECORD {index} ]"
+        blocks.append(header + "-" * max(0, width + 12 - display_width(header)))
+        for column, value in zip(columns, row):
+            blocks.append(f"{pad(column, width)} | {format_value(value, null_string)}")
+    return "\n".join(blocks)
 
 
 @contextlib.contextmanager

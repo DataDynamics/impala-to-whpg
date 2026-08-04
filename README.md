@@ -217,30 +217,14 @@ bin/s3-ops rmdir    s3://dw-stage/orders/ --older-than 7d --yes
 확인할 때 쓰세요. 각 명령의 동작과 안전장치는 [S3 파일 다루기](#s3-파일-다루기)에
 있습니다.
 
-### 대화형 셸
-
-`beeline`·`sqlplus` 처럼 붙어서 쿼리를 주고받습니다. `conf/config.yaml` 의 접속
-정보를 그대로 쓰므로 인자 없이 바로 열립니다.
-
-```bash
-bin/gp-shell                 # bin/gp-query -i 와 같습니다
-bin/impala-shell
-bin/gp-shell --host other-gp.example.com   # 개별 값 덮어쓰기도 그대로
-```
+### `bin/impala-shell` / `bin/gp-shell`
 
 ```
-dw=> SELECT order_dt, status, count(*)
-dw->   FROM staging.orders
-dw->  GROUP BY 1, 2;
-order_dt   | status   | count
------------+----------+------
-2026-08-01 | 결제완료 | 12
-2행
-dw=>
+bin/gp-shell [접속옵션]          # bin/gp-query --interactive 와 같습니다
 ```
 
-문장은 세미콜론으로 끝냅니다. 여러 줄로 이어 쓰면 프롬프트가 `->` 로 바뀝니다.
-따옴표나 주석 안의 세미콜론은 문장 끝으로 세지 않습니다.
+접속 옵션은 각 쿼리 도구와 같습니다. 인자 없이 실행하면 `conf/config.yaml` 의
+접속 정보로 바로 열립니다.
 
 | 메타 명령 | 하는 일 |
 | --- | --- |
@@ -250,36 +234,14 @@ dw=>
 | `\set 이름 값` / `\set` / `\unset 이름` | 템플릿 변수 지정 / 보기 / 지우기 |
 | `\o 파일.csv` / `\o` | 결과를 CSV로 / 화면으로 |
 | `\timing` | 구간별 소요 시간 표시 켜기·끄기 |
+| `\x` | 세로 출력 켜기·끄기 (컬럼이 많을 때) |
+| `\dt [패턴]` / `\d 이름` | 테이블 목록 / 컬럼 정보 |
+| `\e` | `$EDITOR` 로 편집한 뒤 실행 |
+| `\paste` (`:paste`) | 긴 쿼리를 통째로 붙여넣기 |
 | `\begin` `\commit` `\rollback` | 트랜잭션 (Greenplum) |
 
-**`\set` 과 `\i` 가 `sql/` 템플릿과 맞물립니다.** 변수를 한 번 정해두고 파일을
-실행하면 `--var` 와 같은 값이 채워집니다.
-
-```
-dw=> \set dt 2026-08-01
-dw=> \i order_summary.sql
-```
-
-**기본은 문장마다 바로 반영(autocommit)입니다.** 셸은 세션이 길어서 한 트랜잭션으로
-묶어두면 잠금이 계속 유지됩니다. 묶고 싶으면 `\begin` 을 쓰세요. 덕분에 `VACUUM`
-처럼 트랜잭션 블록 안에서 못 도는 문장도 셸에서는 실행됩니다.
-
-문장 하나가 실패해도 셸은 끝나지 않습니다. Greenplum 이면 실패한 트랜잭션을
-정리하므로 이후 문장이 계속 거부되는 일도 없습니다.
-
-파이프로도 씁니다. 터미널이 아니면 프롬프트와 히스토리를 끄고 순서대로 실행합니다.
-
-```bash
-echo "SELECT 1;" | bin/gp-shell
-bin/gp-shell < script.sql
-```
-
-히스토리는 `~/.impala-to-whpg/history-{greenplum,impala}` 에 권한 600 으로 둡니다.
-쿼리에 값이 그대로 들어 있어서 저장소 안에 두지 않습니다.
-
-아직 없는 것(2단계): 실행 중인 쿼리를 `Ctrl-C` 로 취소, `\d` 테이블 정보,
-Greenplum 의 `$$ ... $$` 인용. 함수 정의처럼 `$$` 안에 세미콜론이 들어가는 문장은
-`\i` 로 파일째 실행하세요.
+문장은 세미콜론으로 끝내고, 실행 중인 문장은 `Ctrl-C` 로 취소합니다.
+자세한 사용법은 [대화형 셸 쓰기](#대화형-셸-쓰기)에 있습니다.
 
 ### 종료 코드
 
@@ -503,6 +465,111 @@ bin/gp-query -f cleanup.sql --var dt=2026-08-01 --dry-run
 비밀번호는 `--password` 같은 인자로 받지 않습니다. 설정의 `greenplum.password`
 (보통 `${GP_PASSWORD}` 참조), 환경변수, 대화형 입력 순으로 찾습니다. 셋 다 없어도
 접속을 시도합니다 — `.pgpass`나 trust 인증을 쓰는 환경이 있기 때문입니다.
+
+## 대화형 셸 쓰기
+
+`beeline`·`sqlplus` 처럼 붙어서 쿼리를 주고받습니다. `conf/config.yaml` 의 접속
+정보를 그대로 쓰므로 인자 없이 바로 열립니다.
+
+```bash
+bin/gp-shell                 # bin/gp-query -i 와 같습니다
+bin/impala-shell
+bin/gp-shell --host other-gp.example.com   # 개별 값 덮어쓰기도 그대로
+```
+
+```
+dw=> SELECT order_dt, status, count(*)
+dw->   FROM staging.orders
+dw->  GROUP BY 1, 2;
+order_dt   | status   | count
+-----------+----------+------
+2026-08-01 | 결제완료 | 12
+2행
+dw=>
+```
+
+문장은 세미콜론으로 끝냅니다. 여러 줄로 이어 쓰면 프롬프트가 `->` 로 바뀝니다.
+따옴표나 주석 안의 세미콜론은 문장 끝으로 세지 않습니다.
+
+메타 명령 목록은 [커맨드 사용법](#binimpala-shell--bingp-shell)에 있습니다.
+
+**`\set` 과 `\i` 가 `sql/` 템플릿과 맞물립니다.** 변수를 한 번 정해두고 파일을
+실행하면 `--var` 와 같은 값이 채워집니다.
+
+```
+dw=> \set dt 2026-08-01
+dw=> \i order_summary.sql
+```
+
+**기본은 문장마다 바로 반영(autocommit)입니다.** 셸은 세션이 길어서 한 트랜잭션으로
+묶어두면 잠금이 계속 유지됩니다. 묶고 싶으면 `\begin` 을 쓰세요. 덕분에 `VACUUM`
+처럼 트랜잭션 블록 안에서 못 도는 문장도 셸에서는 실행됩니다.
+
+문장 하나가 실패해도 셸은 끝나지 않습니다. Greenplum 이면 실패한 트랜잭션을
+정리하므로 이후 문장이 계속 거부되는 일도 없습니다.
+
+파이프로도 씁니다. 터미널이 아니면 프롬프트와 히스토리를 끄고 순서대로 실행합니다.
+
+```bash
+echo "SELECT 1;" | bin/gp-shell
+bin/gp-shell < script.sql
+```
+
+히스토리는 `~/.impala-to-whpg/history-{greenplum,impala}` 에 권한 600 으로 둡니다.
+쿼리에 값이 그대로 들어 있어서 저장소 안에 두지 않습니다.
+
+**실행 중인 문장은 `Ctrl-C` 로 취소합니다.** 서버에 취소를 요청하는 것이라 즉시
+끝나지 않을 수 있습니다. 셸은 그대로 살아 있습니다.
+
+```
+dw=> SELECT count(*) FROM huge;
+^C
+취소하는 중입니다...
+취소했습니다.
+dw=>
+```
+
+DB 드라이버는 실행 중 GIL을 놓기 때문에, 문장을 그냥 기다리면 `Ctrl-C` 가 아예
+먹지 않습니다. 그래서 실행을 별도 스레드로 넘기고 메인은 짧게 끊어 기다립니다.
+
+컬럼이 많아 가로로 넘치면 `\x` 로 세로로 봅니다.
+
+```
+dw=> \x
+dw=> SELECT * FROM orders LIMIT 1;
+-[ RECORD 1 ]-------
+order_dt | 2026-08-01
+status   | 결제완료
+주문건수 | 12
+```
+
+`$$ ... $$` 인용도 통째로 넘깁니다. 함수 본문의 세미콜론을 문장 끝으로 세지
+않으므로 `CREATE FUNCTION` 을 그대로 붙여 넣을 수 있습니다.
+
+### 긴 쿼리 붙여넣기
+
+`\paste` 로 여러 줄을 통째로 받습니다. `spark-shell` 습관대로 `:paste` 라고 쳐도
+됩니다. `Ctrl-D` 또는 `\.` 만 있는 줄로 끝냅니다.
+
+```
+dw=> \paste
+붙여넣고 Ctrl-D 로 끝냅니다. (\. 만 있는 줄도 됩니다)
+| SELECT order_id, amount
+|   FROM staging.orders
+|  WHERE status = 'PAID'
+| ^D
+1개 문장을 실행합니다.
+```
+
+평소에도 여러 줄 입력은 되지만, 붙여넣을 때는 두 가지가 달라집니다.
+
+- **세미콜론이 없어도 됩니다.** 남은 조각을 통째로 한 문장으로 봅니다. 다른 데서
+  복사해 온 쿼리에는 끝에 `;` 가 없는 경우가 많습니다.
+- **`\` 로 시작하는 줄이 메타 명령으로 잡히지 않습니다.** 값 안에 백슬래시가 들어간
+  쿼리를 그대로 붙여 넣을 수 있습니다.
+
+세미콜론으로 나뉜 여러 문장을 붙여 넣으면 순서대로 실행합니다. 하나가 실패해도
+나머지는 계속됩니다. `\set` 으로 정해둔 변수도 그대로 채워집니다.
 
 ## S3 파일 다루기
 

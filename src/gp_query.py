@@ -242,6 +242,11 @@ def write_output(
     return 0
 
 
+def quote_literal(value: str) -> str:
+    """SQL 문자열 리터럴로 감싼다. 카탈로그 조회에 이름을 넣을 때 쓴다."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]) -> "shell.Engine":
     """대화형 셸이 쓸 엔진 어댑터. 접속 인자는 기존 것을 그대로 재사용한다."""
 
@@ -259,12 +264,38 @@ def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]
             finally:
                 cursor.close()
 
+    def cancel(conn: Any, cursor: Any) -> None:
+        # psycopg2 의 cancel 은 다른 스레드에서 불러도 안전하도록 만들어졌다
+        conn.cancel()
+
+    def list_tables_sql(pattern: Optional[str]) -> str:
+        where = "WHERE schemaname NOT IN ('pg_catalog', 'information_schema')"
+        if pattern:
+            where += f" AND tablename LIKE {quote_literal(pattern)}"
+        return (
+            "SELECT schemaname AS schema, tablename AS table, tableowner AS owner "
+            f"FROM pg_catalog.pg_tables {where} ORDER BY 1, 2"
+        )
+
+    def describe_sql(target: str) -> str:
+        schema, _, name = target.rpartition(".")
+        where = f"WHERE table_name = {quote_literal(name)}"
+        if schema:
+            where += f" AND table_schema = {quote_literal(schema)}"
+        return (
+            "SELECT column_name, data_type, is_nullable, column_default "
+            f"FROM information_schema.columns {where} ORDER BY ordinal_position"
+        )
+
     return shell.Engine(
         name="Greenplum",
         label=args.database,
         connect=connect,
         transactional=True,
         enable_autocommit=enable_autocommit,
+        cancel=cancel,
+        list_tables_sql=list_tables_sql,
+        describe_sql=describe_sql,
     )
 
 
