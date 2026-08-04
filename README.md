@@ -6,7 +6,7 @@ Impala 조회, Greenplum 실행, S3 조작을 위한 명령행 도구 모음입�
 | --- | --- |
 | `bin/impala-query` | Impala에 쿼리를 실행하고 결과를 표나 CSV로 보여줍니다. 구간별 소요 시간도 함께. |
 | `bin/gp-query` | Greenplum에 SQL을 실행하고 결과를 표나 CSV로 보여줍니다. |
-| `bin/s3-ops` | S3 업로드·다운로드·삭제·목록·내용 확인. |
+| `bin/s3-ops` | S3 업로드·다운로드·복사·이동·삭제·목록·내용 확인. |
 
 pip로 설치하지 않고 저장소에서 바로 실행합니다. `bin/` 아래 스크립트가 소스 위치를
 찾아 파이썬에 넘겨주므로 어느 디렉터리에서 호출해도 동작합니다. 다른 인터프리터를
@@ -117,6 +117,111 @@ bin/impala-query --host other-impala.example.com -q "SELECT 1" -o out.csv
 경고: 환경변수 IMPALA_PASSWORD 가 정의되지 않아 설정값을 건너뜁니다.
 ```
 
+## 커맨드 사용법
+
+세 스크립트가 공통으로 받는 인자입니다.
+
+| 옵션 | 설명 |
+| --- | --- |
+| `-c`, `--config PATH` | 설정 파일 지정 (기본 `conf/config.yaml`) |
+| `--no-config` | 설정 파일을 읽지 않고 명령행 인자만 씁니다 |
+| `--no-progress` | 진행 상황을 출력하지 않습니다 (소요 시간 요약은 그대로) |
+| `--debug` | 도구마다 뜻이 다릅니다 — 아래 각 표 참고 |
+| `-h`, `--help` | 도움말. 인자 없이 실행해도 같습니다 |
+
+### `bin/impala-query`
+
+```
+bin/impala-query [접속] (-q SQL | -f FILE.sql) [-V KEY=VALUE ...] [-o OUTPUT] [출력옵션]
+```
+
+| 묶음 | 옵션 |
+| --- | --- |
+| 접속 | `--host` `--port` `-d/--database` `-u/--user` `--password-env` `--ca-cert` `--timeout` `--auth-mechanism` `--kerberos-service-name` `--no-ssl` `--sasl-backend` `--http-transport` `--http-path` |
+| 쿼리 | `-q/--query` `-f/--query-file` `-V/--var KEY=VALUE` `--sql-dir` |
+| 세션 | `--set KEY=VALUE` |
+| 출력 | `-o/--output` `--gzip` `--delimiter` `--quote` `--escapechar` `--encoding` `--no-header` `--null-string` `--max-rows` `--batch-size` |
+
+`--debug`는 실행할 SQL과 SASL 핸드셰이크 로그를 출력합니다.
+
+```bash
+bin/impala-query -f daily_orders.sql -V dt=2026-08-01                    # 표
+bin/impala-query -f daily_orders.sql -V dt=2026-08-01 -o out.csv.gz --gzip
+bin/impala-query -q "SELECT 1" -o out.csv --no-config --host h -u u
+```
+
+### `bin/gp-query`
+
+```
+bin/gp-query [접속] (-q SQL | -f FILE.sql) [-V KEY=VALUE ...] [-o OUTPUT] [--dry-run]
+```
+
+| 묶음 | 옵션 |
+| --- | --- |
+| 접속 | `--host` `--port` `-d/--database` `-u/--user` `--password-env` `--no-password-prompt` `--schema` `--sslmode` `--timeout` |
+| 쿼리 | `-q/--query` `-f/--query-file` `-V/--var KEY=VALUE` `--sql-dir` |
+| 세션 | `--session-sql SQL` `--dry-run` |
+| 출력 | `-o/--output` `--gzip` `--delimiter` `--encoding` `--no-header` `--null-string` `--max-rows` |
+
+`--debug`는 템플릿을 채운 뒤 실제로 보내는 SQL을 출력합니다.
+
+```bash
+bin/gp-query -f order_summary.sql -V dt=2026-08-01        # 표
+bin/gp-query -q "SELECT * FROM staging.orders" -o out.csv
+bin/gp-query -q "TRUNCATE staging.orders"                 # 성공하면 커밋
+bin/gp-query -f cleanup.sql -V dt=2026-08-01 --dry-run    # 실행 후 항상 롤백
+```
+
+### `bin/s3-ops`
+
+접속 옵션은 모든 하위 명령에 공통이며 **하위 명령보다 앞에** 옵니다.
+
+```
+bin/s3-ops [-b BUCKET] [--access-key KEY] [--secret-key SECRET] [--session-token TOKEN]
+           [--region REGION] [--endpoint URL] [-n/--dry-run] <명령> ...
+```
+
+| 명령 | 사용법 | 하는 일 |
+| --- | --- | --- |
+| `ls` | `ls [--summary] [--dirs] [--older-than 기간] URI` | 접두사 아래 목록 |
+| `head` | `head [-n LINES] [--max-bytes N] [--encoding ENC] [--raw] URI` | 앞부분 보기 (`.gz` 자동 해제) |
+| `exists` | `exists [-q] URI` | 있는지 확인 (종료 코드 `0`/`1`/`5`) |
+| `buckets` | `buckets [--show-region]` | 계정의 버킷 목록 |
+| `upload` | `upload [-r] [--sse SSE] SOURCE URI` | 로컬 → S3 |
+| `download` | `download [-r] [--force] URI DESTINATION` | S3 → 로컬 |
+| `cp` | `cp [-r] SOURCE URI` | S3 안에서 복사 (서버측) |
+| `mv` | `mv [-r] SOURCE URI` | S3 안에서 이동 (복사 후 원본 삭제) |
+| `mkdir` | `mkdir URI` | 디렉터리 표시용 빈 오브젝트 |
+| `rm` | `rm [-y] URI` | 파일 하나 삭제 |
+| `rmdir` | `rmdir [-y] [--older-than 기간] URI` | 접두사 아래 전체 삭제 |
+
+`URI`는 `s3://버킷/키` 형태입니다. `-b/--bucket`이나 설정의 `s3.bucket`이 있으면
+`s3://` 없이 키만 줘도 됩니다. `--debug`는 오류가 났을 때 전체 스택 트레이스를
+출력합니다.
+
+```bash
+bin/s3-ops ls       s3://dw-stage/orders/ --summary
+bin/s3-ops head     s3://dw-stage/orders/2026-08-01/part-0.csv.gz -n 3
+bin/s3-ops upload   ./out/ s3://dw-stage/orders/2026-08-01/ --recursive
+bin/s3-ops download s3://dw-stage/orders/2026-08-01/ ./out/ --recursive
+bin/s3-ops mv       s3://dw-stage/orders/2026-08-01/ s3://dw-stage/archive/2026-08-01/ -r
+bin/s3-ops rmdir    s3://dw-stage/orders/ --older-than 7d --yes
+```
+
+`-n`/`--dry-run`은 무엇을 할지만 보여주고 실행하지 않습니다. 삭제·이동 전에
+확인할 때 쓰세요.
+
+### 종료 코드
+
+| 코드 | 뜻 | 쓰는 스크립트 |
+| --- | --- | --- |
+| `0` | 성공 | 전부 |
+| `1` | 대상이 없거나 사용자가 취소함 | `s3-ops` |
+| `2` | 인자가 잘못됨 (argparse) | 전부 |
+| `3` | 필요한 파이썬 패키지 없음 | `impala-query`, `gp-query` |
+| `4` | 접속 실패 | `impala-query`, `gp-query` |
+| `5` | 쿼리·명령 실행 실패, 권한 없음 | 전부 |
+
 ## 소요 시간과 진행 상황
 
 **세 스크립트 모두 작업이 끝나면 구간별 소요 시간을 출력합니다.** 성공하든 실패하든
@@ -195,16 +300,7 @@ dt="$(date -d yesterday +%Y-%m-%d)"
 PYTHON=/opt/python3.11/bin/python3
 ```
 
-종료 코드로 실패를 판별할 수 있습니다.
-
-| 코드 | 뜻 | 쓰는 스크립트 |
-| --- | --- | --- |
-| `0` | 성공 | 전부 |
-| `1` | 대상이 없거나 사용자가 취소함 | `s3-ops` |
-| `2` | 인자가 잘못됨 (argparse) | 전부 |
-| `3` | 필요한 파이썬 패키지 없음 | `impala-query`, `gp-query` |
-| `4` | 접속 실패 | `impala-query`, `gp-query` |
-| `5` | 쿼리·명령 실행 실패 | 전부 |
+실패는 종료 코드로 판별합니다. [종료 코드 표](#종료-코드) 참고.
 
 ## 문서
 
@@ -346,6 +442,10 @@ bin/s3-ops head     s3://dw-stage/orders/2026-08-01/orders.csv.gz
 bin/s3-ops mkdir    s3://dw-stage/orders/2026-08-03/
 bin/s3-ops rm       s3://dw-stage/orders/orders.csv --yes
 bin/s3-ops rmdir    s3://dw-stage/orders/out/ --yes
+bin/s3-ops cp       s3://dw-stage/orders/a.csv s3://dw-stage/archive/
+bin/s3-ops mv       s3://dw-stage/orders/2026-08-01/ s3://dw-stage/archive/2026-08-01/ -r
+bin/s3-ops exists   s3://dw-stage/orders/2026-08-01/_DONE
+bin/s3-ops buckets
 ```
 
 ### 올린 파일 확인하기
@@ -395,6 +495,52 @@ bin/s3-ops rmdir s3://dw-stage/orders/ --older-than 7d --yes    # 정리
 ```cron
 0 4 * * * /srv/impala-to-whpg/bin/s3-ops rmdir s3://dw-stage/orders/ --older-than 7d --yes >> /var/log/etl.log 2>&1
 ```
+
+### 옮기기와 복사
+
+`cp`와 `mv`는 **서버측 복사**입니다. 받아서 다시 올리지 않으므로 큰 파일도 네트워크를
+타지 않습니다. `mv`는 S3에 이동이 없어서 복사 후 원본을 지웁니다.
+
+```bash
+bin/s3-ops cp s3://dw-stage/orders/a.csv s3://dw-stage/archive/
+bin/s3-ops mv s3://dw-stage/orders/2026-08-01/ s3://dw-stage/archive/2026-08-01/ -r
+```
+
+적재가 끝난 접두사를 `archive/`로 옮겨두는 패턴에 씁니다. **`mv`는 복사가 끝난 것만
+지우므로**, 중간에 실패해도 아직 복사되지 않은 원본은 남습니다. `--dry-run`으로 무엇이
+움직일지 먼저 볼 수 있습니다.
+
+### 있는지 확인하기
+
+`exists`는 종료 코드로 알려줘서 셸 조건문에 바로 씁니다.
+
+```bash
+if bin/s3-ops exists -q s3://dw-stage/orders/2026-08-01/_DONE; then
+    echo "적재 완료 표시가 있습니다"
+fi
+```
+
+| 코드 | 뜻 |
+| --- | --- |
+| `0` | 있음 |
+| `1` | 없음 |
+| `5` | 권한 없음 |
+
+**없음(`1`)과 권한 없음(`5`)을 구분합니다.** `403`을 "없음"으로 처리하면 권한 문제를
+데이터 문제로 착각하게 됩니다.
+
+소요 시간 요약은 stderr로 나가므로 조건문에는 영향이 없습니다. 로그까지 지우려면
+`2>/dev/null`을 붙이세요.
+
+### 버킷 목록
+
+```bash
+bin/s3-ops buckets
+bin/s3-ops buckets --show-region   # 버킷마다 호출이 한 번씩 늘어납니다
+```
+
+`s3:ListAllMyBuckets` 권한이 필요합니다. 이 권한 없이 특정 버킷만 쓰는 계정도 흔하니,
+**목록이 비었다고 버킷이 없는 건 아닙니다.** 그때는 `exists`로 개별 접근을 확인하세요.
 
 ### 다운로드
 

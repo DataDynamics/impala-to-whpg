@@ -14,6 +14,8 @@
 | 디렉터리만 묶어 보기 (4절) | `bin/s3-ops ls ... --dirs` |
 | 오래 남은 찌꺼기 (5절) | `bin/s3-ops ls ... --older-than 24h` |
 | 파일 내용 확인 (6절) | `bin/s3-ops head s3://버킷/키` |
+| 파일 하나 메타데이터 (7절) | `bin/s3-ops exists s3://버킷/키` |
+| 버킷 목록 (1절) | `bin/s3-ops buckets --show-region` |
 | 정리 | `bin/s3-ops rmdir ... --older-than 7d --yes` |
 
 ## 준비

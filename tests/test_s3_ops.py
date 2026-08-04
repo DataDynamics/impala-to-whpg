@@ -27,6 +27,9 @@ class FakeS3Client:
         self.uploaded: List[Any] = []
         self.delete_calls: List[List[str]] = []
         self.fail_deleting: set = set()
+        self.copied: List[Any] = []
+        self.buckets: List[str] = []
+        self.locations: Dict[str, Any] = {}
 
     # -- 목록 --
     def get_paginator(self, name):
@@ -60,6 +63,22 @@ class FakeS3Client:
 
     def put_object(self, Bucket, Key, Body=b""):
         self.objects[Key] = Body
+
+    def copy_object(self, Bucket, Key, CopySource):
+        source = CopySource["Key"]
+        if source not in self.objects:
+            raise ClientError("404")
+        self.copied.append((source, Key))
+        self.objects[Key] = self.objects[source]
+
+    def list_buckets(self):
+        return {"Buckets": [
+            {"Name": name, "CreationDate": datetime(2026, 8, 1, tzinfo=timezone.utc)}
+            for name in self.buckets
+        ]}
+
+    def get_bucket_location(self, Bucket):
+        return {"LocationConstraint": self.locations.get(Bucket)}
 
     # -- 읽기 --
     def download_file(self, bucket, key, local):
@@ -136,6 +155,9 @@ def args_for(command: str, **overrides) -> argparse.Namespace:
         max_bytes=64 * 1024,
         encoding="utf-8",
         raw=False,
+        quiet=False,
+        source=None,
+        show_region=False,
     )
     options.update(overrides)
     return argparse.Namespace(**options)
@@ -424,7 +446,7 @@ def test_no_arguments_prints_help(capsys):
     assert s.main([]) == 0
     output = capsys.readouterr().out
     assert "usage: bin/s3-ops" in output
-    assert "{ls,upload,download,head,mkdir,rm,rmdir}" in output
+    assert "{ls,upload,download,head,exists,cp,mv,buckets,mkdir,rm,rmdir}" in output
 
 
 def test_no_arguments_does_not_build_a_client(monkeypatch, capsys):
@@ -958,3 +980,171 @@ def test_rmdir_older_than_says_so_when_nothing_matches(capsys):
     s.cmd_rmdir(client, args_for("rmdir", uri="s3://b/p/", older_than="9999d"))
     assert "지울 오브젝트가 없습니다" in capsys.readouterr().out
     assert client.delete_calls == []
+
+
+# -- exists -----------------------------------------------------------------------
+
+
+def test_exists_returns_0_when_present(capsys):
+    client = FakeS3Client({"orders/_DONE": b""})
+    assert s.cmd_exists(client, args_for("exists", uri="s3://b/orders/_DONE")) == 0
+    assert "있습니다" in capsys.readouterr().out
+
+
+def test_exists_returns_1_when_missing(capsys):
+    assert s.cmd_exists(FakeS3Client(), args_for("exists", uri="s3://b/none")) == 1
+    assert "없습니다" in capsys.readouterr().err
+
+
+def test_exists_quiet_prints_nothing(capsys):
+    client = FakeS3Client({"a": b""})
+    assert s.cmd_exists(client, args_for("exists", uri="s3://b/a", quiet=True)) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
+
+
+def test_exists_distinguishes_permission_denied(capsys):
+    """403 을 '없음' 으로 처리하면 권한 문제를 데이터 문제로 착각한다."""
+
+    class Denied(FakeS3Client):
+        def head_object(self, Bucket, Key):
+            raise ClientError("403")
+
+    assert s.cmd_exists(Denied(), args_for("exists", uri="s3://b/a")) == 5
+    assert "권한이 없습니다" in capsys.readouterr().err
+
+
+def test_exists_rejects_a_bare_bucket():
+    with pytest.raises(SystemExit):
+        s.cmd_exists(FakeS3Client(), args_for("exists", uri="s3://b"))
+
+
+# -- cp / mv ----------------------------------------------------------------------
+
+
+def test_cp_uses_server_side_copy():
+    """받아서 다시 올리지 않는다. S3 안에서 처리한다."""
+    client = FakeS3Client({"a/x.csv": b"1"})
+    assert s.cmd_cp(client, args_for("cp", source="s3://b/a/x.csv",
+                                     uri="s3://b/archive/x.csv")) == 0
+    assert client.copied == [("a/x.csv", "archive/x.csv")]
+    assert client.objects["archive/x.csv"] == b"1"
+
+
+def test_cp_into_a_prefix_keeps_the_name():
+    client = FakeS3Client({"a/x.csv": b"1"})
+    s.cmd_cp(client, args_for("cp", source="s3://b/a/x.csv", uri="s3://b/archive/"))
+    assert "archive/x.csv" in client.objects
+
+
+def test_cp_recursive_keeps_structure():
+    client = FakeS3Client({"a/1.csv": b"1", "a/sub/2.csv": b"2"})
+    s.cmd_cp(client, args_for("cp", source="s3://b/a/", uri="s3://b/archive/",
+                              recursive=True))
+    assert "archive/1.csv" in client.objects
+    assert "archive/sub/2.csv" in client.objects
+
+
+def test_cp_between_buckets():
+    client = FakeS3Client({"x.csv": b"1"})
+    s.cmd_cp(client, args_for("cp", source="s3://src/x.csv", uri="s3://dst/x.csv"))
+    assert client.copied == [("x.csv", "x.csv")]
+
+
+def test_cp_skips_identical_source_and_target(capsys):
+    client = FakeS3Client({"a/x.csv": b"1"})
+    s.cmd_cp(client, args_for("cp", source="s3://b/a/x.csv", uri="s3://b/a/x.csv"))
+    assert client.copied == []
+    assert "원본과 대상이 같습니다" in capsys.readouterr().err
+
+
+def test_cp_dry_run_copies_nothing(capsys):
+    client = FakeS3Client({"a/x.csv": b"1"})
+    s.cmd_cp(client, args_for("cp", source="s3://b/a/x.csv", uri="s3://b/c/x.csv",
+                              dry_run=True))
+    assert client.copied == []
+    assert "[예행]" in capsys.readouterr().out
+
+
+def test_mv_copies_then_deletes_the_source():
+    client = FakeS3Client({"a/x.csv": b"1"})
+    assert s.cmd_mv(client, args_for("mv", source="s3://b/a/x.csv",
+                                     uri="s3://b/archive/x.csv")) == 0
+    assert "archive/x.csv" in client.objects
+    assert "a/x.csv" not in client.objects
+
+
+def test_mv_recursive():
+    client = FakeS3Client({"a/1.csv": b"1", "a/2.csv": b"2"})
+    s.cmd_mv(client, args_for("mv", source="s3://b/a/", uri="s3://b/archive/",
+                              recursive=True))
+    assert sorted(client.objects) == ["archive/1.csv", "archive/2.csv"]
+
+
+def test_mv_dry_run_keeps_the_source(capsys):
+    client = FakeS3Client({"a/x.csv": b"1"})
+    s.cmd_mv(client, args_for("mv", source="s3://b/a/x.csv", uri="s3://b/c/x.csv",
+                              dry_run=True))
+    assert "a/x.csv" in client.objects
+    assert client.delete_calls == []
+
+
+def test_mv_does_not_delete_what_it_could_not_copy():
+    """복사가 끝난 것만 지운다. 실패하면 원본이 남아야 한다."""
+
+    class FailingCopy(FakeS3Client):
+        def copy_object(self, Bucket, Key, CopySource):
+            raise RuntimeError("복사 실패")
+
+    client = FailingCopy({"a/x.csv": b"1"})
+    with pytest.raises(RuntimeError):
+        s.cmd_mv(client, args_for("mv", source="s3://b/a/x.csv", uri="s3://b/c/x.csv"))
+    assert "a/x.csv" in client.objects
+    assert client.delete_calls == []
+
+
+# -- buckets ----------------------------------------------------------------------
+
+
+def test_buckets_lists_names(capsys):
+    client = FakeS3Client()
+    client.buckets = ["dw-stage", "dw-archive"]
+    assert s.cmd_buckets(client, args_for("buckets")) == 0
+    out = capsys.readouterr().out
+    assert "dw-stage" in out and "dw-archive" in out and "2개" in out
+
+
+def test_buckets_region_is_opt_in(capsys):
+    client = FakeS3Client()
+    client.buckets = ["dw-stage"]
+    client.locations = {"dw-stage": "ap-northeast-2"}
+
+    s.cmd_buckets(client, args_for("buckets"))
+    assert "ap-northeast-2" not in capsys.readouterr().out
+
+    s.cmd_buckets(client, args_for("buckets", show_region=True))
+    assert "ap-northeast-2" in capsys.readouterr().out
+
+
+def test_buckets_us_east_1_shows_a_name_not_none(capsys):
+    """us-east-1 은 역사적 이유로 None 을 돌려준다."""
+    client = FakeS3Client()
+    client.buckets = ["legacy"]
+    client.locations = {"legacy": None}
+    s.cmd_buckets(client, args_for("buckets", show_region=True))
+    assert "us-east-1" in capsys.readouterr().out
+
+
+def test_buckets_explains_missing_permission(capsys):
+    class Denied(FakeS3Client):
+        def list_buckets(self):
+            raise ClientError("AccessDenied")
+
+    assert s.cmd_buckets(Denied(), args_for("buckets")) == 5
+    err = capsys.readouterr().err
+    assert "ListAllMyBuckets" in err and "exists" in err
+
+
+def test_buckets_empty_is_not_an_error(capsys):
+    assert s.cmd_buckets(FakeS3Client(), args_for("buckets")) == 0
+    assert "권한 범위가 좁은" in capsys.readouterr().out

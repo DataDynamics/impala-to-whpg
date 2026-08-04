@@ -1,4 +1,4 @@
-"""S3 파일·디렉터리 조작 (업로드, 다운로드, 삭제, 목록, 내용 확인).
+"""S3 파일·디렉터리 조작 (업로드, 다운로드, 복사, 이동, 삭제, 목록, 내용 확인).
 
     bin/s3-ops ls       s3://dw-stage/orders/
     bin/s3-ops ls       s3://dw-stage/orders/ --summary
@@ -450,6 +450,177 @@ def cmd_head(client: Any, args: argparse.Namespace, bucket: Optional[str] = None
     return 0
 
 
+def cmd_exists(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    """오브젝트가 있는지 확인한다. 종료 코드로 알려주므로 셸 조건문에 바로 쓴다.
+
+        if bin/s3-ops exists s3://dw-stage/orders/2026-08-01/_DONE; then ...
+
+    없을 때(1)와 접근 권한이 없을 때(5)를 구분한다. 403 을 "없음" 으로 처리하면
+    권한 문제를 데이터 문제로 착각하게 된다.
+    """
+    bucket, key = resolve_target(args.uri, bucket)
+    if not key:
+        raise SystemExit(f"확인할 키가 없습니다: {args.uri}")
+
+    from botocore.exceptions import ClientError
+
+    try:
+        meta = client.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code in ("404", "NoSuchKey"):
+            if not args.quiet:
+                print(f"없습니다: s3://{bucket}/{key}", file=sys.stderr)
+            return 1
+        if code == "403":
+            print(f"권한이 없습니다: s3://{bucket}/{key}", file=sys.stderr)
+            return 5
+        raise
+
+    if not args.quiet:
+        size = human(meta.get("ContentLength", 0))
+        modified = meta.get("LastModified")
+        when = f"  {modified:%Y-%m-%d %H:%M}" if modified else ""
+        print(f"있습니다: s3://{bucket}/{key}  {size}{when}")
+    return 0
+
+
+def iter_copy_pairs(
+    client: Any, source_bucket: str, source_key: str, dest_key: str, recursive: bool
+) -> List[Tuple[str, str]]:
+    """(원본 키, 대상 키) 쌍을 만든다."""
+    if recursive or source_key.endswith("/"):
+        prefix = as_directory(source_key) if source_key else ""
+        target = as_directory(dest_key) if dest_key else ""
+        pairs = []
+        for obj in sorted(list_objects(client, source_bucket, prefix), key=lambda o: o["Key"]):
+            pairs.append((obj["Key"], target + obj["Key"][len(prefix):]))
+        return pairs
+
+    # 대상이 디렉터리로 끝나면 원본 이름을 붙인다
+    if dest_key.endswith("/") or not dest_key:
+        dest_key = dest_key + source_key.rsplit("/", 1)[-1]
+    return [(source_key, dest_key)]
+
+
+def copy_objects(
+    client: Any,
+    source_bucket: str,
+    dest_bucket: str,
+    pairs: Sequence[Tuple[str, str]],
+    args: argparse.Namespace,
+    verb: str,
+) -> int:
+    """서버측 복사로 오브젝트를 옮긴다. 실제로 복사한 개수를 돌려준다.
+
+    copy_object 는 S3 안에서 처리되므로 받아서 다시 올리지 않는다. 큰 파일도
+    네트워크를 타지 않는다.
+    """
+    reporter = progress.Progress(
+        verb,
+        total=len(pairs),
+        unit="개",
+        enabled=len(pairs) > 1 and not getattr(args, "no_progress", False),
+    )
+    copied = 0
+    for done, (source_key, dest_key) in enumerate(pairs, 1):
+        if source_bucket == dest_bucket and source_key == dest_key:
+            print(f"원본과 대상이 같습니다. 건너뜁니다: {source_key}", file=sys.stderr)
+            continue
+        if args.dry_run:
+            print(f"[예행] s3://{source_bucket}/{source_key} → s3://{dest_bucket}/{dest_key}")
+            continue
+        client.copy_object(
+            Bucket=dest_bucket,
+            Key=dest_key,
+            CopySource={"Bucket": source_bucket, "Key": source_key},
+        )
+        copied += 1
+        reporter.update(done)
+        print(f"s3://{source_bucket}/{source_key} → s3://{dest_bucket}/{dest_key}")
+    reporter.finish()
+    return copied
+
+
+def cmd_cp(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    source_bucket, source_key = resolve_target(args.source, bucket)
+    dest_bucket, dest_key = resolve_target(args.uri, bucket)
+    pairs = iter_copy_pairs(client, source_bucket, source_key, dest_key, args.recursive)
+    if not pairs:
+        print(f"복사할 오브젝트가 없습니다: s3://{source_bucket}/{source_key}")
+        return 0
+
+    copied = copy_objects(client, source_bucket, dest_bucket, pairs, args, "복사")
+    if not args.dry_run:
+        print(f"\n{copied}개 복사했습니다.")
+    return 0
+
+
+def cmd_mv(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    """복사한 뒤 원본을 지운다.
+
+    S3 에는 이동이 없어서 복사 + 삭제로 처리한다. **복사가 끝난 것만** 지우므로,
+    중간에 실패해도 아직 복사되지 않은 원본은 남는다.
+    """
+    source_bucket, source_key = resolve_target(args.source, bucket)
+    dest_bucket, dest_key = resolve_target(args.uri, bucket)
+    pairs = iter_copy_pairs(client, source_bucket, source_key, dest_key, args.recursive)
+    if not pairs:
+        print(f"옮길 오브젝트가 없습니다: s3://{source_bucket}/{source_key}")
+        return 0
+
+    copied = copy_objects(client, source_bucket, dest_bucket, pairs, args, "이동")
+    if args.dry_run:
+        print(f"[예행] 원본 {len(pairs)}개는 지우지 않았습니다.")
+        return 0
+
+    moved_keys = [src for src, _ in pairs[:copied]]
+    deleted = delete_keys(client, source_bucket, moved_keys) if moved_keys else 0
+    print(f"\n{copied}개 복사, 원본 {deleted}개 삭제했습니다.")
+    return 0 if deleted == copied else 1
+
+
+def cmd_buckets(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
+    """계정의 버킷을 나열한다.
+
+    s3:ListAllMyBuckets 권한이 있어야 한다. 이 권한 없이 특정 버킷만 쓰는 계정도
+    흔하므로, 목록이 비었다고 버킷이 없는 것은 아니다. 그때는 exists 로 개별
+    버킷 접근을 확인하는 편이 낫다.
+    """
+    from botocore.exceptions import ClientError
+
+    try:
+        response = client.list_buckets()
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("AccessDenied", "403"):
+            print(
+                "버킷 목록을 볼 권한이 없습니다(s3:ListAllMyBuckets).\n"
+                "  쓰려는 버킷을 이미 안다면 exists 로 접근만 확인하세요.",
+                file=sys.stderr,
+            )
+            return 5
+        raise
+
+    buckets = response.get("Buckets") or []
+    if not buckets:
+        print("버킷이 없습니다. 권한 범위가 좁은 계정일 수도 있습니다.")
+        return 0
+
+    for entry in sorted(buckets, key=lambda b: b["Name"]):
+        line = entry["Name"]
+        created = entry.get("CreationDate")
+        if created:
+            line = f"{created:%Y-%m-%d}  {line}"
+        if args.show_region:
+            # 버킷마다 한 번씩 더 부르므로 필요할 때만 켠다
+            location = client.get_bucket_location(Bucket=entry["Name"])
+            # us-east-1 은 역사적 이유로 None 을 돌려준다
+            line += f"  ({location.get('LocationConstraint') or 'us-east-1'})"
+        print(line)
+    print(f"\n{len(buckets)}개")
+    return 0
+
+
 def cmd_mkdir(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
     bucket, key = resolve_target(args.uri, bucket)
     if not key:
@@ -550,6 +721,10 @@ COMMANDS = {
     "upload": cmd_upload,
     "download": cmd_download,
     "head": cmd_head,
+    "exists": cmd_exists,
+    "cp": cmd_cp,
+    "mv": cmd_mv,
+    "buckets": cmd_buckets,
     "mkdir": cmd_mkdir,
     "rm": cmd_rm,
     "rmdir": cmd_rmdir,
@@ -559,7 +734,7 @@ COMMANDS = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bin/s3-ops",
-        description="S3 파일·디렉터리 조작 (업로드, 다운로드, 삭제, 목록, 내용 확인)",
+        description="S3 파일·디렉터리 조작 (업로드, 다운로드, 복사, 이동, 삭제, 목록, 내용 확인)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "예시:\n"
@@ -570,6 +745,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  bin/s3-ops head     s3://dw-stage/orders/2026-08-01/part-0.csv.gz\n"
             "  bin/s3-ops rm       s3://dw-stage/orders/orders.csv --yes\n"
             "  bin/s3-ops rmdir    s3://dw-stage/orders/ --older-than 7d --yes\n"
+            "  bin/s3-ops mv       s3://dw-stage/orders/2026-08-01/ \\\n"
+            "                      s3://dw-stage/archive/2026-08-01/ --recursive\n"
+            "  bin/s3-ops exists   s3://dw-stage/orders/2026-08-01/_DONE\n"
             "\n"
             "  # --bucket 을 주면 s3:// 없이 키만 써도 됩니다\n"
             "  bin/s3-ops --bucket dw-stage ls impala/\n"
@@ -666,6 +844,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     head.add_argument("--encoding", default="utf-8", help="파일 인코딩 (기본 utf-8)")
     head.add_argument("--raw", action="store_true", help="gzip 자동 해제를 하지 않습니다")
+
+    exists = sub.add_parser("exists", help="오브젝트가 있는지 확인 (종료 코드로 알림)")
+    exists.add_argument("uri", help="s3://버킷/키")
+    exists.add_argument(
+        "-q", "--quiet", action="store_true", help="아무것도 출력하지 않고 종료 코드만"
+    )
+
+    cp = sub.add_parser("cp", help="S3 안에서 복사 (서버측 복사)")
+    cp.add_argument("source", help="원본 s3://버킷/키 (또는 접두사/)")
+    cp.add_argument("uri", help="대상 s3://버킷/키 (또는 접두사/)")
+    cp.add_argument("-r", "--recursive", action="store_true", help="접두사 아래 전체")
+
+    mv = sub.add_parser("mv", help="S3 안에서 이동 (복사 후 원본 삭제)")
+    mv.add_argument("source", help="원본 s3://버킷/키 (또는 접두사/)")
+    mv.add_argument("uri", help="대상 s3://버킷/키 (또는 접두사/)")
+    mv.add_argument("-r", "--recursive", action="store_true", help="접두사 아래 전체")
+
+    buckets = sub.add_parser("buckets", help="계정의 버킷 목록")
+    # 전역 --region(AWS 리전 지정)과 헷갈리지 않도록 이름을 나눈다
+    buckets.add_argument(
+        "--show-region",
+        action="store_true",
+        help="버킷마다 리전도 함께 보여줍니다 (버킷당 호출이 한 번씩 늘어납니다)",
+    )
 
     mkdir = sub.add_parser("mkdir", help="디렉터리 표시용 빈 오브젝트 생성")
     mkdir.add_argument("uri", help="s3://버킷/접두사/")
