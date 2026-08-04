@@ -575,6 +575,10 @@ def make_engine(args: argparse.Namespace, dbapi: Any, password: Optional[str]) -
     def describe_sql(target: str) -> str:
         return f"DESCRIBE {target}"
 
+    def table_names_sql() -> str:
+        # SHOW TABLES 는 현재 데이터베이스의 이름만 준다
+        return "SHOW TABLES"
+
     # Impala 에는 트랜잭션이 없다. autocommit 을 켜고 말고 할 것이 없다.
     return shell.Engine(
         name="Impala",
@@ -583,6 +587,7 @@ def make_engine(args: argparse.Namespace, dbapi: Any, password: Optional[str]) -
         cancel=cancel,
         list_tables_sql=list_tables_sql,
         describe_sql=describe_sql,
+        table_names_sql=table_names_sql,
     )
 
 

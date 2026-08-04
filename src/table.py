@@ -86,22 +86,36 @@ def print_result(
     표는 데이터라 stdout 으로 가야 파이프로 넘길 수 있고, 요약은 보고라 stderr
     로 가야 그 데이터에 섞이지 않는다.
     """
-    out = stream or sys.stdout
+    body, note = format_result(columns, rows, truncated, null_string, vertical)
+    print(body, file=stream or sys.stdout)
+    print(note, file=sys.stderr)
+
+
+def format_result(
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    truncated: bool,
+    null_string: str = "NULL",
+    vertical: bool = False,
+) -> Tuple[str, str]:
+    """(화면에 낼 본문, 행 수 요약) 을 만든다.
+
+    본문과 요약을 나눠 두면 셸이 본문만 페이저로 넘길 수 있다.
+    """
     if rows:
         draw = render_vertical if vertical else render
-        print(draw(columns, rows, null_string), file=out)
+        body = draw(columns, rows, null_string)
     else:
-        print(" | ".join(columns), file=out)
-        print("(0행)", file=out)
+        body = " | ".join(columns) + "\n(0행)"
 
     if truncated:
-        print(
+        note = (
             f"{len(rows):,}행 이상 (앞 {len(rows):,}행만 표시 — "
-            "전부 보려면 --max-rows 0, 파일로 받으려면 -o)",
-            file=sys.stderr,
+            "전부 보려면 --max-rows 0, 파일로 받으려면 -o)"
         )
     else:
-        print(f"{len(rows):,}행", file=sys.stderr)
+        note = f"{len(rows):,}행"
+    return body, note
 
 
 def render_vertical(

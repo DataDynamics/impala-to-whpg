@@ -1,6 +1,7 @@
 """src/shell.py 검증 — 대화형 SQL 셸 (실제 DB 없이 가짜 커서로 실행)."""
 
 import argparse
+import os
 import sys
 import threading
 from datetime import date
@@ -35,6 +36,11 @@ class FakeCursor:
         self._rows = list(rows)
         self._offset = 0
         self.rowcount = rowcount
+
+    def fetchall(self):
+        rows = self._rows[self._offset :]
+        self._offset = len(self._rows)
+        return rows
 
     def fetchmany(self, size: int):
         batch = self._rows[self._offset : self._offset + size]
@@ -102,6 +108,7 @@ def make_shell(transactional=True, **overrides):
             f"SHOW TABLES LIKE '{pattern}'" if pattern else "SHOW TABLES"
         ),
         describe_sql=lambda target: f"DESCRIBE {target}",
+        table_names_sql=lambda: "SHOW TABLES",
     )
     options = dict(var=[], max_rows=100, sql_dir=None)
     options.update(overrides)
@@ -733,3 +740,198 @@ def test_paste_is_listed_in_help(capsys):
     s, _ = make_shell()
     s.feed("\\?")
     assert "\\paste" in capsys.readouterr().out
+
+
+# -- 자동완성 ---------------------------------------------------------------------
+
+
+def test_completes_meta_commands():
+    s, _ = make_shell()
+    assert s.candidates("\\d") == ["\\d", "\\dt"]
+    assert "\\paste" in s.candidates("\\p")
+
+
+def test_completes_the_spark_shell_spelling():
+    s, _ = make_shell()
+    assert s.candidates(":") == [":paste"]
+
+
+def test_completes_table_names():
+    s, conn = make_shell()
+    conn.result = (["name"], [("orders",), ("order_items",), ("customers",)], -1)
+    assert s.candidates("order")[:2] == ["order_items", "orders"]
+    assert "customers" not in s.candidates("order")
+
+
+def test_completes_sql_keywords():
+    s, conn = make_shell()
+    conn.result = (["name"], [], -1)
+    assert "SELECT" in s.candidates("sel")
+
+
+def test_table_names_come_before_keywords():
+    """이름은 기억하기 어렵고 키워드는 외우고 있다."""
+    s, conn = make_shell()
+    conn.result = (["name"], [("selected_orders",)], -1)
+    assert s.candidates("sel")[0] == "selected_orders"
+
+
+def test_table_names_are_cached():
+    """카탈로그 조회가 느릴 수 있어 Tab 마다 부르지 않는다."""
+    s, conn = make_shell()
+    conn.result = (["name"], [("orders",)], -1)
+    s.candidates("o")
+    s.candidates("o")
+    assert conn.executed.count("SHOW TABLES") == 1
+
+
+def test_dt_refreshes_the_cache():
+    s, conn = make_shell()
+    conn.result = (["name"], [("orders",)], -1)
+    s.candidates("o")
+    s.feed("\\dt")
+    s.candidates("o")
+    assert conn.executed.count("SHOW TABLES") == 3     # 최초 + \dt + 다시 채우기
+
+
+def test_completion_failure_is_silent(capsys):
+    """자동완성이 실패했다고 셸이 시끄러워질 이유는 없다."""
+    s, conn = make_shell()
+    conn.fail_on = "SHOW TABLES"
+    assert s.candidates("orders") == []      # 테이블 이름은 못 받았지만
+    assert capsys.readouterr().err == ""     # 조용하다
+
+
+def test_completion_without_engine_support():
+    """카탈로그를 못 주는 엔진이어도 키워드 완성은 된다."""
+    conn = FakeConnection()
+    engine = sh.Engine("Something", "x", lambda: conn)
+    s = sh.Shell(engine, argparse.Namespace(var=[], max_rows=100, sql_dir=None))
+    s.conn = conn
+    assert s.candidates("orders") == []
+    assert "ORDER BY" in s.candidates("order")
+
+
+def test_complete_callback_walks_the_matches():
+    s, conn = make_shell()
+    conn.result = (["name"], [("orders",), ("order_items",)], -1)
+    assert s.complete("order", 0) == "order_items"
+    assert s.complete("order", 1) == "orders"
+    assert s.complete("order", 2) == "ORDER BY"     # 그다음은 키워드
+    assert s.complete("order", 3) is None
+
+
+def test_empty_prefix_completes_nothing():
+    """빈 입력에 테이블 전체를 쏟아내면 방해가 된다."""
+    s, _ = make_shell()
+    assert s.candidates("") == []
+
+
+# -- 페이저 -----------------------------------------------------------------------
+
+
+def test_pager_is_not_used_when_not_interactive(capsys, monkeypatch):
+    s, _ = make_shell()
+    monkeypatch.setattr(sh.subprocess, "Popen", lambda *a, **k: pytest.fail("페이저 금지"))
+    s.page("한 줄\n" * 200)
+    assert "한 줄" in capsys.readouterr().out
+
+
+def test_pager_off_prints_directly(capsys, monkeypatch):
+    s, _ = make_shell()
+    s.interactive = True
+    s.feed("\\pager off")
+    monkeypatch.setattr(sh.subprocess, "Popen", lambda *a, **k: pytest.fail("페이저 금지"))
+    s.page("x\n" * 500)
+    assert "x" in capsys.readouterr().out
+
+
+def test_short_output_skips_the_pager_in_auto(capsys, monkeypatch):
+    """화면에 들어가는 결과까지 페이저를 거치면 성가시다."""
+    s, _ = make_shell()
+    s.interactive = True
+    monkeypatch.setattr(sh.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 40)))
+    monkeypatch.setattr(sh.subprocess, "Popen", lambda *a, **k: pytest.fail("페이저 금지"))
+    s.page("줄\n" * 5)
+    assert "줄" in capsys.readouterr().out
+
+
+def test_long_output_uses_the_pager(monkeypatch):
+    s, _ = make_shell()
+    s.interactive = True
+    monkeypatch.setattr(sh.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 10)))
+    seen = {}
+
+    class FakeProc:
+        def communicate(self, text):
+            seen["text"] = text
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(sh.subprocess, "Popen", lambda *a, **k: FakeProc())
+    s.page("줄\n" * 100)
+    assert seen["text"].count("줄") == 100
+
+
+def test_pager_on_always_pages(monkeypatch):
+    s, _ = make_shell()
+    s.interactive = True
+    s.feed("\\pager on")
+    used = {}
+
+    class FakeProc:
+        def communicate(self, text):
+            used["yes"] = True
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(sh.subprocess, "Popen", lambda *a, **k: FakeProc())
+    s.page("한 줄")
+    assert used.get("yes")
+
+
+def test_broken_pipe_is_not_an_error(monkeypatch):
+    """페이저를 먼저 끝내면 BrokenPipe 가 난다. 오류가 아니다."""
+    s, _ = make_shell()
+    s.interactive = True
+    s.pager = "on"
+
+    class FakeProc:
+        def communicate(self, text):
+            raise BrokenPipeError
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(sh.subprocess, "Popen", lambda *a, **k: FakeProc())
+    s.page("x")          # 예외가 새어 나오면 안 된다
+
+
+def test_missing_pager_falls_back_to_printing(capsys, monkeypatch):
+    s, _ = make_shell()
+    s.interactive = True
+    s.pager = "on"
+
+    def boom(*a, **k):
+        raise OSError("없는 명령")
+
+    monkeypatch.setattr(sh.subprocess, "Popen", boom)
+    s.page("내용")
+    out = capsys.readouterr()
+    assert "내용" in out.out
+    assert "페이저를 실행하지 못했습니다" in out.err
+
+
+def test_pager_shows_current_setting(capsys):
+    s, _ = make_shell()
+    s.feed("\\pager")
+    assert "auto" in capsys.readouterr().err
+
+
+def test_pager_is_not_used_for_file_output(tmp_path, monkeypatch):
+    s, conn = make_shell()
+    s.interactive = True
+    s.pager = "on"
+    conn.result = (["a"], [(1,)], -1)
+    monkeypatch.setattr(sh.subprocess, "Popen", lambda *a, **k: pytest.fail("페이저 금지"))
+    s.feed(f"\\o {tmp_path / 'out.csv'}")
+    s.feed("SELECT 1;")

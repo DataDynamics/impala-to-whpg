@@ -12,6 +12,9 @@
 
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -28,6 +31,27 @@ HISTORY_DIR = os.path.join(os.path.expanduser("~"), ".impala-to-whpg")
 #: 한 번에 받아오는 행 수
 FETCH_SIZE = 10_000
 
+#: PAGER 가 없을 때 쓸 기본값.
+#: -F 는 한 화면에 들어가면 그냥 출력, -R 은 색, -S 는 긴 줄을 접지 않고 옆으로,
+#: -X 는 끝난 뒤 화면을 지우지 않는다(결과가 스크롤백에 남는다).
+DEFAULT_PAGER = "less -FRSX"
+
+#: 자동완성에 쓸 SQL 키워드. 많이 넣을수록 방해가 되므로 자주 쓰는 것만 둔다.
+KEYWORDS = (
+    "SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT",
+    "JOIN", "LEFT JOIN", "INNER JOIN", "ON", "AS", "AND", "OR", "NOT", "NULL",
+    "INSERT INTO", "UPDATE", "DELETE FROM", "CREATE TABLE", "DROP TABLE",
+    "ALTER TABLE", "TRUNCATE", "DISTRIBUTED BY", "WITH", "UNION", "CASE",
+    "WHEN", "THEN", "ELSE", "END", "COUNT", "SUM", "AVG", "MIN", "MAX",
+)
+
+#: 자동완성에 쓸 메타 명령 목록
+META_NAMES = (
+    "\\q", "\\?", "\\i", "\\set", "\\unset", "\\o", "\\timing", "\\x",
+    "\\dt", "\\d", "\\e", "\\paste", "\\pager", "\\begin", "\\commit", "\\rollback",
+    ":paste",        # spark-shell 습관대로 치는 사람을 위해 이것도 완성한다
+)
+
 
 class Engine:
     """엔진마다 다른 부분만 담는다. 각 도구 모듈이 만들어 넘긴다."""
@@ -42,6 +66,7 @@ class Engine:
         cancel: Optional[Callable[[Any, Any], None]] = None,
         list_tables_sql: Optional[Callable[[Optional[str]], str]] = None,
         describe_sql: Optional[Callable[[str], str]] = None,
+        table_names_sql: Optional[Callable[[], str]] = None,
     ) -> None:
         self.name = name                      # "Impala" / "Greenplum"
         self.label = label                    # 프롬프트에 쓸 대상 이름
@@ -51,6 +76,7 @@ class Engine:
         self._cancel = cancel
         self.list_tables_sql = list_tables_sql
         self.describe_sql = describe_sql
+        self.table_names_sql = table_names_sql
 
     def cancel(self, conn: Any, cursor: Any) -> bool:
         """실행 중인 문장을 서버에 취소 요청한다. 되면 True."""
@@ -156,6 +182,8 @@ class Shell:
         self.output: Optional[str] = None          # \o 로 지정한 CSV 경로
         self.timing = False
         self.vertical = False
+        self.pager = "auto"                        # auto / on / off
+        self._names: Optional[List[str]] = None    # 자동완성용 테이블 이름 캐시
         self.max_rows = getattr(args, "max_rows", table.DEFAULT_MAX_ROWS)
         self.interactive = sys.stdin.isatty() and progress.is_interactive()
         self.buffer = ""
@@ -181,7 +209,59 @@ class Shell:
         except (OSError, ValueError):
             pass
         readline.set_history_length(1000)
+
+        # 기본 구분자에는 \\ 와 . 이 들어 있어 \\dt 나 schema.table 이 잘린다
+        readline.set_completer_delims(" \t\n")
+        readline.set_completer(self.complete)
+        # libedit(맥 기본)과 GNU readline 의 바인딩 문법이 다르다
+        if "libedit" in getattr(readline, "__doc__", "") or "":
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
         return readline
+
+    def table_names(self) -> List[str]:
+        """자동완성에 쓸 테이블 이름. 처음 Tab 을 누를 때 한 번만 받아둔다.
+
+        카탈로그 조회가 느릴 수 있어 매번 부르지 않는다. 새로 만든 테이블은
+        ``\\dt`` 로 목록을 다시 받으면 캐시도 갱신된다.
+        """
+        if self._names is not None:
+            return self._names
+        self._names = []
+        maker = self.engine.table_names_sql
+        if maker is None:
+            return self._names
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(maker())
+            self._names = [str(row[0]) for row in cursor.fetchall() if row and row[0]]
+        except Exception:
+            # 자동완성이 실패했다고 셸이 시끄러워질 이유는 없다
+            self._recover()
+        finally:
+            cursor.close()
+        return self._names
+
+    def complete(self, text: str, state: int) -> Optional[str]:
+        """readline 자동완성 콜백. state 0 일 때만 후보를 만든다."""
+        if state == 0:
+            self._matches = self.candidates(text)
+        try:
+            return self._matches[state]
+        except IndexError:
+            return None
+
+    def candidates(self, text: str) -> List[str]:
+        if text.startswith("\\") or text.startswith(":"):
+            return sorted(c for c in META_NAMES if c.startswith(text))
+        if not text:
+            return []
+        lowered = text.lower()
+        names = [n for n in self.table_names() if n.lower().startswith(lowered)]
+        keywords = [k for k in KEYWORDS if k.lower().startswith(lowered)]
+        # 테이블 이름을 먼저 보여준다. 키워드는 외우고 있는 경우가 많다.
+        return sorted(set(names)) + sorted(set(keywords))
 
     def save_history(self, readline: Any) -> None:
         if readline is None:
@@ -282,12 +362,50 @@ class Shell:
         return rows
 
     def _emit(self, columns: Sequence[str], rows: Sequence[Sequence[Any]], truncated: bool) -> None:
-        if not self.output:
-            table.print_result(columns, rows, truncated, vertical=self.vertical)
+        if self.output:
+            with table.open_output(self.output, False, "utf-8") as handle:
+                written = table.write_csv(handle, columns, rows)
+            print(f"{self.output}  {written:,}행", file=sys.stderr)
             return
-        with table.open_output(self.output, False, "utf-8") as handle:
-            written = table.write_csv(handle, columns, rows)
-        print(f"{self.output}  {written:,}행", file=sys.stderr)
+
+        body, note = table.format_result(
+            columns, rows, truncated, vertical=self.vertical
+        )
+        self.page(body)
+        print(note, file=sys.stderr)
+
+    def page(self, text: str) -> None:
+        """긴 결과는 페이저로 넘긴다.
+
+        화면에 들어가는 결과까지 페이저를 거치면 오히려 성가시므로, ``auto`` 에서는
+        터미널 높이를 넘을 때만 쓴다. 터미널이 아니면(파이프, 크론) 쓰지 않는다.
+        """
+        if not self.interactive or self.pager == "off":
+            print(text)
+            return
+
+        height = shutil.get_terminal_size(fallback=(80, 24)).lines
+        if self.pager == "auto" and text.count("\n") + 2 < height:
+            print(text)
+            return
+
+        command = os.environ.get("PAGER") or DEFAULT_PAGER
+        try:
+            proc = subprocess.Popen(
+                shlex.split(command), stdin=subprocess.PIPE, text=True
+            )
+        except OSError as exc:
+            print(f"페이저를 실행하지 못했습니다({command}): {exc}", file=sys.stderr)
+            print(text)
+            return
+        try:
+            proc.communicate(text + "\n")
+        except BrokenPipeError:
+            # 사용자가 페이저를 먼저 끝낸 경우다. 오류가 아니다.
+            pass
+        finally:
+            if proc.poll() is None:
+                proc.wait()
 
     # -- 메타 명령 --
     def meta(self, line: str) -> bool:
@@ -331,6 +449,13 @@ class Shell:
             self.edit()
         elif name in ("\\paste", ":paste"):
             self.paste()
+        elif name == "\\pager":
+            choice = (rest[0] if rest else "").lower()
+            if choice not in ("auto", "on", "off"):
+                print(f"페이저: {self.pager}  (\\pager auto|on|off)", file=sys.stderr)
+            else:
+                self.pager = choice
+                print(f"페이저: {self.pager}", file=sys.stderr)
         elif name in ("\\begin", "\\commit", "\\rollback"):
             self.transaction(name)
         else:
@@ -369,6 +494,8 @@ class Shell:
         if maker is None:
             print(f"{self.engine.name} 에서는 지원하지 않습니다.", file=sys.stderr)
             return
+        if name == "\\dt":
+            self._names = None          # 목록을 다시 받으니 자동완성 캐시도 비운다
         print(f"-- {label}", file=sys.stderr)
         try:
             self.run_sql(maker(target))
@@ -422,7 +549,6 @@ class Shell:
 
     def edit(self) -> None:
         """``$EDITOR`` 로 문장을 편집한다. 저장하고 나오면 그대로 실행한다."""
-        import subprocess
         import tempfile
 
         editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
@@ -554,10 +680,12 @@ HELP = """\
   \\d 이름            컬럼 정보
   \\e                 $EDITOR 로 편집한 뒤 실행
   \\paste (:paste)    긴 쿼리 붙여넣기. Ctrl-D 또는 \\. 로 끝냅니다.
+  \\pager auto|on|off  긴 결과를 페이저로 넘길지
   \\begin             트랜잭션 시작 (Greenplum)
   \\commit            반영
   \\rollback          되돌리기
 
 문장은 세미콜론(;) 으로 끝냅니다. 여러 줄로 이어 써도 됩니다.
 기본은 문장마다 바로 반영(autocommit)이며, 묶으려면 \\begin 을 씁니다.
-실행 중인 문장은 Ctrl-C 로 취소합니다."""
+실행 중인 문장은 Ctrl-C 로 취소합니다.
+Tab 을 누르면 메타 명령, 테이블 이름, SQL 키워드를 완성합니다."""

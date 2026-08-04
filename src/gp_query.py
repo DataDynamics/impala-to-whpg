@@ -287,6 +287,17 @@ def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]
             f"FROM information_schema.columns {where} ORDER BY ordinal_position"
         )
 
+    def table_names_sql() -> str:
+        # 자동완성용. 스키마를 붙인 이름과 안 붙인 이름을 모두 준다.
+        # search_path 로 잡아둔 스키마는 짧게 치고 싶고, 다른 스키마는 붙여야 한다.
+        visible = "WHERE schemaname NOT IN ('pg_catalog', 'information_schema')"
+        return (
+            f"SELECT tablename AS name FROM pg_catalog.pg_tables {visible} "
+            "UNION "
+            f"SELECT schemaname || '.' || tablename FROM pg_catalog.pg_tables {visible} "
+            "ORDER BY 1"
+        )
+
     return shell.Engine(
         name="Greenplum",
         label=args.database,
@@ -296,6 +307,7 @@ def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]
         cancel=cancel,
         list_tables_sql=list_tables_sql,
         describe_sql=describe_sql,
+        table_names_sql=table_names_sql,
     )
 
 
