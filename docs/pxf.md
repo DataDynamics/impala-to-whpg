@@ -100,6 +100,13 @@ ERROR:  protocol "pxf" does not exist
 CREATE EXTENSION pxf;
 ```
 
+`bin/gp-query` 로는 데이터베이스를 인자로 지정합니다. `\c` 는 psql 명령이라
+이 도구에는 없습니다.
+
+```bash
+bin/gp-query -d dw -q "CREATE EXTENSION pxf"
+```
+
 **확장은 데이터베이스마다 따로 설치해야 합니다.** `postgres` 에 설치했다고 `dw` 에서
 쓸 수 있는 게 아닙니다. 같은 실수를 반복하기 쉬운 지점입니다.
 
@@ -259,7 +266,8 @@ EC2에서 IAM 역할을 쓴다면 키를 비우고 아래처럼 인스턴스 프
 
 ## 4. S3 경로를 가리키는 외부 테이블
 
-여기가 실제로 "S3 경로를 추가"하는 곳입니다.
+여기가 실제로 "S3 경로를 추가"하는 곳입니다. SQL 은 `bin/gp-query` 로 실행하거나
+`bin/gp-shell` 에서 붙여넣습니다.
 
 ```sql
 CREATE EXTERNAL TABLE staging.ext_orders (

@@ -15,7 +15,7 @@
     bin/gp-query -q "TRUNCATE staging.orders"
 
     # 실제로 반영하지 않고 무엇이 바뀌는지만 확인 (실행 후 롤백)
-    bin/gp-query -f cleanup.sql --var dt=2026-08-01 --dry-run
+    bin/gp-query -f load_orders.sql --var dt=2026-08-01 --dry-run
 
 SELECT 이든 DDL 이든 한 트랜잭션에서 실행하고, 성공하면 커밋한다. 중간에 실패하면
 전부 롤백된다. ``--dry-run`` 은 실행은 하되 항상 롤백한다.
@@ -329,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  bin/gp-query -q \"TRUNCATE staging.orders\"\n"
             "\n"
             "  # 실행은 하되 반영하지 않고 확인만 (항상 롤백)\n"
-            "  bin/gp-query -f cleanup.sql -V dt=2026-08-01 --dry-run\n"
+            "  bin/gp-query -f load_orders.sql -V dt=2026-08-01 --dry-run\n"
             "\n"
             f"접속 정보는 {appconfig.DEFAULT_CONFIG} 의\n"
             "greenplum 섹션에서 자동으로 읽습니다. 아래 인자를 주면 그 값이 우선합니다.\n"

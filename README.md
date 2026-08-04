@@ -178,7 +178,7 @@ bin/gp-query [접속] (-q SQL | -f FILE.sql) [-V KEY=VALUE ...] [-o OUTPUT] [--d
 bin/gp-query -f order_summary.sql -V dt=2026-08-01        # 표
 bin/gp-query -q "SELECT * FROM staging.orders" -o out.csv
 bin/gp-query -q "TRUNCATE staging.orders"                 # 성공하면 커밋
-bin/gp-query -f cleanup.sql -V dt=2026-08-01 --dry-run    # 실행 후 항상 롤백
+bin/gp-query -f load_orders.sql -V dt=2026-08-01 --dry-run  # 실행 후 항상 롤백
 ```
 
 ### `bin/s3-ops`
@@ -399,6 +399,7 @@ sql/
   daily_orders.sql     # 하루치 주문 (--var dt)
   order_range.sql      # 기간별 집계 (--var from_dt, to_dt)
   order_summary.sql    # Greenplum 적재분 집계 (--var dt)
+  load_orders.sql      # S3 → 외부 테이블 → 적재 (--var dt)
   README.md            # 템플릿 작성법
 
 conf/
@@ -455,7 +456,7 @@ order_dt   | status   | order_cnt | amount_sum
 확인할 때 쓰세요.
 
 ```bash
-bin/gp-query -f cleanup.sql --var dt=2026-08-01 --dry-run
+bin/gp-query -f load_orders.sql --var dt=2026-08-01 --dry-run
 # 1,204행
 # --dry-run 이므로 롤백했습니다. 반영되지 않았습니다.
 ```

@@ -95,6 +95,15 @@ SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'
 ------------------
 ```
 
+## 이 디렉터리의 파일
+
+| 파일 | 대상 | 필요한 변수 |
+| --- | --- | --- |
+| `daily_orders.sql` | Impala | `dt` (선택: `status`) |
+| `order_range.sql` | Impala | `from_dt`, `to_dt` |
+| `order_summary.sql` | Greenplum | `dt` (선택: `schema`) |
+| `load_orders.sql` | Greenplum | `dt` (나머지는 기본값) |
+
 ## 파일 목록
 
 `--query-file` 에 없는 이름을 주면 여기 있는 `.sql` 파일을 나열해 줍니다.

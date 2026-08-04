@@ -14,6 +14,7 @@ bin/impala-query \
 bin/s3-ops upload orders.csv.gz s3://dw-stage/orders/2026-08-01/
 
 # 3) Greenplum에서 외부 테이블로 읽는다 (아래 3번 절)
+bin/gp-query -f load_orders.sql --var dt=2026-08-01
 ```
 
 ## 왜 S3를 거치는가
@@ -86,6 +87,15 @@ bin/s3-ops --config conf/config.local.yaml ls s3://dw-stage/orders/2026-08-01/
 딸려옵니다. 위 예제처럼 날짜나 실행 ID를 경로에 넣는 편이 안전합니다.
 
 ## 3. 외부 테이블 작성
+
+아래 SQL 은 `bin/gp-query` 로 실행합니다. 여러 문장을 한 번에 보내려면 `sql/` 에
+파일로 두고 `-f` 로 부르는 편이 낫습니다.
+
+```bash
+bin/gp-query -f load_orders.sql --var dt=2026-08-01
+```
+
+셸에서 붙여넣어도 됩니다. `\paste` 로 통째로 넣고 `\dt` 로 결과를 확인하세요.
 
 ```sql
 CREATE READABLE EXTERNAL TABLE ext_orders_20260801 (
