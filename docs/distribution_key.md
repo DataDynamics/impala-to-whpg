@@ -1,8 +1,8 @@
 # Greenplum 분산키 선정 가이드
 
-`jobs[].distributed_by` 에 넣을 컬럼을 고를 때 참고하는 문서입니다. 지정하지 않으면
-`key_columns` → SELECT 결과의 첫 컬럼 순으로 추론하는데, 이 기본값이 항상 좋은
-선택은 아니므로 큰 테이블은 아래 절차로 한 번 확인하는 편이 좋습니다.
+`CREATE TABLE ... DISTRIBUTED BY (...)` 에 넣을 컬럼을 고를 때 참고하는 문서입니다.
+`DISTRIBUTED BY` 를 생략하면 Greenplum이 첫 컬럼이나 기본키로 정하는데, 이 기본값이
+항상 좋은 선택은 아니므로 큰 테이블은 아래 절차로 한 번 확인하는 편이 좋습니다.
 
 분산키 선정은 결국 세 가지를 보는 일입니다.
 
@@ -169,22 +169,27 @@ SELECT gp_segment_id, count(*) AS rows
 - 복합키는 컬럼을 늘릴수록 고유값이 늘어 분배는 고르지만, 조인 시 그 조합이 전부
   일치해야 지역 조인이 되므로 실익이 줄어듭니다. 2개를 넘기지 않는 편이 좋습니다.
 
-## 이 프로젝트에서 쓰기
+## 확인한 컬럼 적용하기
 
-확인한 컬럼을 작업 설정에 넣습니다. `replace` 모드거나 대상 테이블이 없어
-자동 생성될 때 `DISTRIBUTED BY` 절에 반영됩니다.
+새로 만드는 테이블이라면 `DISTRIBUTED BY` 절에 넣습니다.
 
-```yaml
-jobs:
-  - query: SELECT * FROM sales.orders
-    target_table: orders
-    mode: replace
-    distributed_by: [customer_id]
+```sql
+CREATE TABLE staging.orders (
+    order_id     bigint,
+    customer_id  bigint,
+    order_dt     date,
+    amount       numeric(18,2)
+)
+DISTRIBUTED BY (customer_id);
 ```
 
-이미 만들어진 테이블의 분산키는 적재 시 바뀌지 않습니다. 변경하려면 Greenplum에서
-직접 바꾸거나, `mode: replace` 로 테이블을 다시 만들어야 합니다.
+이미 만들어진 테이블은 데이터를 유지한 채 바꿀 수 있습니다. 전체 재분배가 일어나므로
+큰 테이블에서는 시간이 걸립니다.
 
 ```sql
 ALTER TABLE staging.orders SET DISTRIBUTED BY (customer_id);
 ```
+
+외부 테이블로 S3 파일을 읽어 적재하는 절차는
+[S3 외부 테이블로 읽기](s3_external_table.md)에 있습니다. 분산키는 적재 대상 테이블의
+속성이라 외부 테이블 쪽에는 지정하지 않습니다.

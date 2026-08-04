@@ -1,8 +1,11 @@
 # boto3로 S3 버킷·파일 목록 보기
 
-`load_method: s3` 로 적재할 때 쓰는 버킷을 확인하거나, 만들어진 스테이징 파일을
-들여다보거나, 실패한 작업이 남긴 찌꺼기를 찾을 때 쓰는 예제입니다.
-`cleanup: false` 로 두고 파일을 살펴보면 디버깅이 훨씬 수월합니다.
+쓰려는 버킷에 접근이 되는지 확인하거나, 올린 파일을 들여다보거나, 지우지 않고
+남은 찌꺼기를 찾을 때 쓰는 예제입니다.
+
+대부분은 `bin/s3-ops` 로 바로 할 수 있습니다(`ls`, `rm`, `rmdir`). 이 문서는 그
+스크립트가 무엇을 하고 있는지, 그리고 스크립트에 없는 것을 직접 짤 때 무엇을
+조심해야 하는지를 다룹니다.
 
 ## 준비
 
@@ -146,7 +149,7 @@ import boto3
 s3 = boto3.client("s3")
 
 paginator = s3.get_paginator("list_objects_v2")
-pages = paginator.paginate(Bucket="dw-stage", Prefix="impala-to-greenplum/")
+pages = paginator.paginate(Bucket="dw-stage", Prefix="orders/")
 
 for page in pages:
     # 결과가 하나도 없으면 Contents 키 자체가 없다
@@ -155,9 +158,9 @@ for page in pages:
 ```
 
 ```
-impala-to-greenplum/orders-9f2c1a7b/part-00000.tsv.gz	 12,431,882 bytes	2026-08-03 04:12:31+00:00
-impala-to-greenplum/orders-9f2c1a7b/part-00001.tsv.gz	 12,402,117 bytes	2026-08-03 04:12:44+00:00
-impala-to-greenplum/orders-9f2c1a7b/part-00002.tsv.gz	  8,110,004 bytes	2026-08-03 04:12:51+00:00
+orders/2026-08-01/orders-00.csv.gz	 12,431,882 bytes	2026-08-03 04:12:31+00:00
+orders/2026-08-01/orders-01.csv.gz	 12,402,117 bytes	2026-08-03 04:12:44+00:00
+orders/2026-08-01/orders-02.csv.gz	  8,110,004 bytes	2026-08-03 04:12:51+00:00
 ```
 
 ## 3. 요약해서 보기 — 개수와 총 용량
@@ -186,16 +189,17 @@ def summarize(bucket: str, prefix: str) -> None:
           f"평균 {total / len(sizes) / 1024 / 1024:.1f}MB / "
           f"최대 {max(sizes) / 1024 / 1024:.1f}MB")
 
-summarize("dw-stage", "impala-to-greenplum/")
+summarize("dw-stage", "orders/")
 ```
 
-파일 개수가 세그먼트 수보다 적으면 병렬성을 다 못 씁니다. `s3.file_size_mb` 를
-줄이세요. 자세한 내용은 [S3 외부 테이블 적재 설정](s3_external_table.md)에 있습니다.
+외부 테이블로 읽을 파일이라면 개수가 세그먼트 수보다 적을 때 병렬성을 다 못 씁니다.
+쿼리를 쪼개 파일을 더 잘게 나누세요. 자세한 내용은
+[S3 외부 테이블로 읽기](s3_external_table.md)에 있습니다.
 
 ## 4. 실행 단위로 묶어 보기 (Delimiter)
 
-이 프로젝트는 실행마다 `{prefix}/{테이블명}-{난수}/` 아래에 파일을 올립니다.
-`Delimiter="/"` 를 주면 파일 대신 그 "디렉터리" 목록만 받을 수 있습니다.
+실행 단위마다 `{테이블명}/{날짜}/` 처럼 접두사를 나눠 올렸다면,
+`Delimiter="/"` 를 줘서 파일 대신 그 "디렉터리" 목록만 받을 수 있습니다.
 
 ```python
 import boto3
@@ -205,7 +209,7 @@ paginator = s3.get_paginator("list_objects_v2")
 
 pages = paginator.paginate(
     Bucket="dw-stage",
-    Prefix="impala-to-greenplum/",
+    Prefix="orders/",
     Delimiter="/",          # 이 구분자 아래는 접어서 CommonPrefixes로 돌려준다
 )
 
@@ -215,18 +219,19 @@ for page in pages:
 ```
 
 ```
-impala-to-greenplum/customers-3b7e11d2/
-impala-to-greenplum/orders-9f2c1a7b/
-impala-to-greenplum/orders-c04af881/
+orders/2026-08-01/
+orders/2026-08-02/
+orders/2026-08-03/
 ```
 
 `Delimiter` 없이 부르면 하위 파일이 전부 평면적으로 나오고, 주면 한 단계만 봅니다.
-실행이 몇 번 남아 있는지 훑을 때 편합니다.
+실행이 몇 번 남아 있는지 훑을 때 편합니다. `bin/s3-ops ls` 도 같은 방식으로
+디렉터리를 접어서 보여줍니다.
 
 ## 5. 오래 남은 찌꺼기 찾기
 
-`cleanup` 을 꺼둔 채 돌렸거나 프로세스가 강제 종료되면 파일이 남을 수 있습니다.
-하루 이상 지난 것만 골라냅니다.
+적재 후 지우는 것을 잊었거나 프로세스가 중간에 죽으면 파일이 남습니다. 하루 이상
+지난 것만 골라냅니다.
 
 ```python
 from datetime import datetime, timedelta, timezone
@@ -245,7 +250,7 @@ def find_stale(bucket: str, prefix: str, older_than_hours: int = 24):
         if obj["LastModified"] < cutoff        # LastModified는 tz-aware datetime
     ]
 
-stale = find_stale("dw-stage", "impala-to-greenplum/")
+stale = find_stale("dw-stage", "orders/")
 for obj in sorted(stale, key=lambda o: o["LastModified"]):
     print(obj["LastModified"], obj["Key"], f"{obj['Size']:,}")
 print(f"총 {len(stale)}개, {sum(o['Size'] for o in stale) / 1024**3:.2f}GB")
@@ -272,7 +277,7 @@ def delete_all(bucket: str, keys: list[str]) -> None:
 # delete_all("dw-stage", [o["Key"] for o in stale])
 ```
 
-## 6. 스테이징 파일 내용 확인
+## 6. 올라간 파일 내용 확인
 
 올라간 gzip 파일이 제대로 인코딩됐는지 앞부분만 열어봅니다. 전체를 받지 않고
 `Range` 로 앞 몇 KB만 가져오면 큰 파일도 부담이 없습니다.
@@ -288,10 +293,10 @@ def peek(bucket: str, key: str, lines: int = 5) -> None:
     body = s3.get_object(Bucket=bucket, Key=key)["Body"]
     with gzip.open(body, "rt", encoding="utf-8") as fp:
         for _, line in zip(range(lines), fp):
-            # COPY TEXT 포맷이라 탭 구분, NULL은 \N
+            # --delimiter $'\t' 로 뽑은 파일이라 탭 구분
             print(line.rstrip("\n").split("\t"))
 
-peek("dw-stage", "impala-to-greenplum/orders-9f2c1a7b/part-00000.tsv.gz")
+peek("dw-stage", "orders/2026-08-01/orders.csv.gz")
 ```
 
 ```
@@ -326,7 +331,7 @@ def exists(bucket: str, key: str) -> bool:
 없는 키에 대해 `404` 를 그냥 삼키면 권한 문제(`403`)까지 "없음"으로 처리되니,
 위처럼 에러 코드를 구분해서 다뤄야 합니다.
 
-## 8. 이 프로젝트 설정을 그대로 재사용하기
+## 8. 설정 파일을 그대로 재사용하기
 
 `conf/config.yaml` 에 이미 버킷과 자격증명이 있으니, 목록 확인 스크립트에서도 같은 설정을
 쓰면 됩니다. `src/s3_ops.py` 의 `read_s3_settings` 가 s3 섹션에서 접속에 필요한 값만
@@ -349,7 +354,7 @@ session = boto3.session.Session(
 client = session.client("s3", endpoint_url=settings["client_endpoint_url"] or None)
 
 paginator = client.get_paginator("list_objects_v2")
-for page in paginator.paginate(Bucket=settings["bucket"], Prefix="impala/"):
+for page in paginator.paginate(Bucket=settings["bucket"], Prefix="orders/"):
     for obj in page.get("Contents", []):
         print(obj["Key"], f"{obj['Size']:,}")
 ```
@@ -357,7 +362,7 @@ for page in paginator.paginate(Bucket=settings["bucket"], Prefix="impala/"):
 같은 일을 명령행에서 하려면:
 
 ```bash
-bin/s3-ops --config conf/config.yaml ls s3://dw-stage/impala/
+bin/s3-ops --config conf/config.yaml ls s3://dw-stage/orders/
 ```
 
 ## S3 호환 스토리지(MinIO 등)
@@ -375,10 +380,12 @@ s3 = boto3.client(
 )
 ```
 
-설정 파일에서는 `s3.client_endpoint_url` 이 이 값에 대응합니다. 이건 boto3가
-업로드할 때 쓰는 주소이고, Greenplum이 읽을 때 쓰는 주소는 `s3.endpoint` 로 따로
-지정한다는 점에 주의하세요. 두 값이 다를 수 있습니다(예: 파이썬은 내부망 주소로,
-세그먼트는 다른 경로로 접근하는 경우).
+설정 파일에서는 `s3.client_endpoint_url` 이 이 값에 대응하고, `bin/s3-ops` 는
+`--endpoint` 로도 받습니다.
+
+**이건 boto3가 올릴 때 쓰는 주소입니다.** Greenplum이 읽을 때 쓰는 주소는 외부 테이블
+LOCATION이나 `s3.conf` 에 따로 적으며, 두 값이 다를 수 있습니다(예: 업로드는 내부망
+주소로, 세그먼트는 다른 경로로 접근하는 경우).
 
 ## 자주 걸리는 것들
 

@@ -1,7 +1,9 @@
 # PXF로 S3 읽기 설정
 
-`s3.protocol: pxf` 를 쓰면 Greenplum 내장 `s3` 프로토콜 대신 PXF를 통해 S3를 읽습니다.
-이 문서는 그때 필요한 PXF 쪽 설정을 다룹니다.
+Greenplum 내장 `s3` 프로토콜 대신 PXF를 통해 S3를 읽을 때 필요한 설정을 다룹니다.
+`bin/s3-ops` 로 올린 파일을 Greenplum에서 읽는다는 목적은 같고, 외부 테이블의
+`LOCATION` 만 `pxf://` 형태로 바뀝니다. 내장 프로토콜 쪽은
+[S3 외부 테이블로 읽기](s3_external_table.md)에 있습니다.
 
 ## 어떤 파일에 무엇을 적는가
 
@@ -76,13 +78,8 @@ ls "$PXF_BASE/servers/"
   `pxf cluster sync` 를 실행하세요. 빠뜨리면 일부 세그먼트에서만
   `server configuration not found` 류의 오류가 납니다.
 
-이 프로젝트에서는 설정의 `s3.pxf_server` 값이 그대로 `SERVER=` 로 들어갑니다.
-
-```yaml
-s3:
-  protocol: pxf
-  pxf_server: s3srv     # → ...&SERVER=s3srv
-```
+`bin/s3-ops` 는 `SERVER=` 를 쓰지 않습니다. 파일을 올릴 뿐이고, 그 파일을 어떤
+서버로 읽을지는 외부 테이블 LOCATION에만 적습니다.
 
 ## 1. 데이터베이스에 pxf 확장 설치
 
@@ -144,13 +141,13 @@ GRANT INSERT ON PROTOCOL pxf TO etl;    -- 쓰기 가능 외부 테이블
 
 ## 2. pxf-profiles.xml — 대부분 건드릴 필요가 없습니다
 
-`s3:text`, `s3:parquet` 같은 기본 프로파일은 이미 정의되어 있습니다. 이 프로젝트가
-올리는 탭 구분 gzip TSV도 기본 `s3:text` 로 그대로 읽히므로, **먼저 커스텀 프로파일
+`s3:text`, `s3:parquet` 같은 기본 프로파일은 이미 정의되어 있습니다. `query-to-csv`
+로 뽑은 탭 구분 gzip 파일도 기본 `s3:text` 로 그대로 읽히므로, **먼저 커스텀 프로파일
 없이 되는지 확인하세요.** 포맷 옵션은 외부 테이블 쪽에 적으면 됩니다.
 
 ```sql
 CREATE EXTERNAL TABLE staging.ext_orders (...)
-LOCATION ('pxf://dw-stage/impala-to-greenplum/orders-9f2c/?PROFILE=s3:text&SERVER=s3srv')
+LOCATION ('pxf://dw-stage/orders/2026-08-01/?PROFILE=s3:text&SERVER=s3srv')
 FORMAT 'TEXT' (DELIMITER E'\t' NULL E'\\N');
 ```
 
@@ -277,7 +274,7 @@ CREATE EXTERNAL TABLE staging.ext_orders (
     name      text,
     amount    numeric(18,2)
 )
-LOCATION ('pxf://dw-stage/impala-to-greenplum/orders-9f2c/?PROFILE=s3:text&SERVER=s3srv')
+LOCATION ('pxf://dw-stage/orders/2026-08-01/?PROFILE=s3:text&SERVER=s3srv')
 FORMAT 'TEXT' (DELIMITER E'\t' NULL E'\\N');
 
 INSERT INTO staging.orders SELECT * FROM staging.ext_orders;
@@ -286,37 +283,33 @@ INSERT INTO staging.orders SELECT * FROM staging.ext_orders;
 LOCATION을 뜯어보면 이렇습니다.
 
 ```
-pxf://dw-stage/impala-to-greenplum/orders-9f2c/?PROFILE=s3:text&SERVER=s3srv
-      └ 버킷 ┘└──────── 접두사(디렉터리) ─────┘  └ 2번 프로파일 ┘└ 3번 서버 ┘
+pxf://dw-stage/orders/2026-08-01/?PROFILE=s3:text&SERVER=s3srv
+      └ 버킷 ┘└─ 접두사(디렉터리) ┘  └ 2번 프로파일 ┘└ 3번 서버 ┘
 ```
 
 - 접두사는 디렉터리처럼 동작합니다. 그 아래 파일을 세그먼트가 나눠 읽습니다.
 - `.gz` 파일은 확장자를 보고 알아서 풀어 읽습니다.
 - 2번에서 만든 프로파일을 쓰려면 `PROFILE=s3:impala-staging` 으로 바꿉니다.
 
-## 5. 이 프로젝트에서 쓰기
+## 5. 파일 올리기
 
-설정에서 `protocol: pxf` 로 바꾸면 파이프라인이 위 형태의 LOCATION을 만들어 줍니다.
+읽을 파일은 `bin/s3-ops` 로 올립니다. LOCATION의 접두사와 업로드 경로가 같아야
+합니다.
 
-```yaml
-s3:
-  bucket: dw-stage
-  prefix: impala-to-greenplum
-  protocol: pxf
-  pxf_server: s3srv          # 3번에서 만든 서버 디렉터리 이름
-  file_size_mb: 128
+```bash
+bin/query-to-csv --host impala.example.com --user etl_user \
+    --query "SELECT order_id, name, amount FROM sales.orders WHERE dt = '2026-08-01'" \
+    --output orders.csv.gz --gzip --delimiter $'\t' --null-string '\N' --no-header
+
+bin/s3-ops upload orders.csv.gz s3://dw-stage/orders/2026-08-01/
 ```
 
-만들어지는 LOCATION은 이렇습니다.
+`FORMAT` 절이 파일을 만든 옵션과 맞아야 합니다. 위 SQL은 탭 구분에 NULL이 `\N` 이고
+헤더가 없는 파일을 전제로 합니다.
 
-```
-pxf://dw-stage/impala-to-greenplum/orders-{난수}/?PROFILE=s3:text&SERVER=s3srv
-```
-
-`endpoint` 나 `gp_config` 는 PXF 모드에서 쓰이지 않습니다. 접속 정보가 전부
-`s3-site.xml` 에 있기 때문입니다. boto3 업로드용 자격증명(`access_key_id` 등)은
-그대로 필요합니다. **파이썬이 올릴 때 쓰는 자격증명과 PXF가 읽을 때 쓰는
-자격증명은 별개**라, 두 곳 모두 같은 버킷에 접근할 수 있어야 합니다.
+**올릴 때 쓰는 자격증명과 PXF가 읽을 때 쓰는 자격증명은 별개입니다.** 전자는
+`bin/s3-ops` 의 boto3 자격증명(`--config` 의 s3 섹션이나 환경변수)이고, 후자는 3번의
+`s3-site.xml` 입니다. 두 곳 모두 같은 버킷에 접근할 수 있어야 합니다.
 
 ## 6. 확인과 문제 해결
 
@@ -331,7 +324,7 @@ pxf cluster restart                   # 프로파일·서버 변경 후
 ```sql
 -- 가장 작은 단위로 먼저 확인
 CREATE EXTERNAL TABLE ext_probe (line text)
-LOCATION ('pxf://dw-stage/impala-to-greenplum/?PROFILE=s3:text&SERVER=s3srv')
+LOCATION ('pxf://dw-stage/orders/?PROFILE=s3:text&SERVER=s3srv')
 FORMAT 'TEXT' (DELIMITER E'\t');
 
 SELECT * FROM ext_probe LIMIT 5;
@@ -463,4 +456,4 @@ pxf cluster sync && pxf cluster restart
 | 포맷 | text, parquet, avro, orc 등 | text, csv |
 
 PXF가 이미 구축되어 있으면 그대로 쓰고, 아니면 설정이 간단한 내장 `s3` 프로토콜이
-낫습니다. 그쪽 절차는 [S3 외부 테이블 적재 설정](s3_external_table.md)에 있습니다.
+낫습니다. 그쪽 절차는 [S3 외부 테이블로 읽기](s3_external_table.md)에 있습니다.

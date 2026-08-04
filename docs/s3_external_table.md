@@ -1,31 +1,43 @@
-# S3 외부 테이블 적재 설정
+# S3 외부 테이블로 읽기
 
-`load_method: s3` 를 쓰면 Impala 결과를 S3에 gzip 파일로 나눠 올린 뒤, Greenplum
-외부 테이블로 읽어 `INSERT ... SELECT` 로 적재합니다. 이 문서는 그 전제 조건인
-Greenplum 쪽 설정을 다룹니다.
+`bin/query-to-csv` 로 뽑은 파일을 `bin/s3-ops` 로 S3에 올려두면, Greenplum 외부
+테이블로 그 파일을 직접 읽을 수 있습니다. 이 문서는 그 전제 조건인 Greenplum 쪽
+설정과 외부 테이블 작성법을 다룹니다.
+
+```bash
+# 1) Impala에서 뽑고
+bin/query-to-csv --host impala.example.com --user etl_user \
+    --query "SELECT * FROM sales.orders WHERE dt = '2026-08-01'" \
+    --output orders.csv --delimiter $'\t' --null-string '\N' --gzip
+
+# 2) S3에 올리고
+bin/s3-ops upload orders.csv.gz s3://dw-stage/orders/2026-08-01/
+
+# 3) Greenplum에서 외부 테이블로 읽는다 (아래 3번 절)
+```
 
 ## 왜 S3를 거치는가
 
-`COPY FROM STDIN` 은 모든 데이터가 마스터 한 대를 통과합니다. 마스터가 병목이 되고,
-세그먼트는 마스터가 나눠주는 만큼만 일합니다.
+파일을 마스터에 두고 `COPY` 로 밀어넣으면 모든 데이터가 마스터 한 대를 통과합니다.
+마스터가 병목이 되고, 세그먼트는 마스터가 나눠주는 만큼만 일합니다.
 
-S3 방식은 각 세그먼트가 자기 몫의 S3 오브젝트를 직접 읽습니다. 세그먼트가 16대면
-16개의 병렬 읽기가 동시에 일어나고, 마스터는 쿼리 조율만 합니다. 데이터가 커질수록
-차이가 벌어집니다.
+외부 테이블 방식은 각 세그먼트가 자기 몫의 S3 오브젝트를 직접 읽습니다. 세그먼트가
+16대면 16개의 병렬 읽기가 동시에 일어나고, 마스터는 쿼리 조율만 합니다. 데이터가
+커질수록 차이가 벌어집니다.
 
 ```
-COPY:  Impala → 파이썬 → 마스터 → (재분배) → 세그먼트
-S3  :  Impala → 파이썬 → S3 → 세그먼트 N대가 병렬로 직접 읽기
+COPY:  파일 → 마스터 → (재분배) → 세그먼트
+S3  :  파일 → S3 → 세그먼트 N대가 병렬로 직접 읽기
 ```
 
-대신 S3 왕복이 추가되므로, 수만 건 수준의 소량 데이터는 `load_method: copy` 가
-오히려 빠릅니다. 작업별로 골라 쓰면 됩니다.
+대신 S3 왕복이 추가되므로, 수만 건 수준의 소량 데이터는 `psql \copy` 가 오히려
+간단하고 빠릅니다.
 
 ## 1. 세그먼트에 s3 프로토콜 설정 파일 배포
 
-Greenplum의 `s3` 프로토콜은 **자체 설정 파일** 로 S3에 접근합니다. 파이썬이 쓰는
-boto3 자격증명과는 별개이고, 이 파일은 마스터와 모든 세그먼트 호스트의 **동일한
-경로** 에 있어야 합니다.
+Greenplum의 `s3` 프로토콜은 **자체 설정 파일** 로 S3에 접근합니다. `bin/s3-ops` 가
+쓰는 boto3 자격증명과는 별개이고, 이 파일은 마스터와 모든 세그먼트 호스트의
+**동일한 경로** 에 있어야 합니다.
 
 파일은 이런 모양입니다.
 
@@ -56,74 +68,71 @@ gpssh -f /home/gpadmin/hostfile -e 'chmod 600 /home/gpadmin/s3.conf'
 gpcheckcloud -c "s3://s3.ap-northeast-2.amazonaws.com/dw-stage/ config=/home/gpadmin/s3.conf"
 ```
 
-## 2. 설정 파일 작성
+## 2. 파일을 S3에 올리기
 
-```yaml
-s3:
-  bucket: dw-stage
-  prefix: impala-to-greenplum
-  endpoint: s3.ap-northeast-2.amazonaws.com   # LOCATION에 들어가는 값
-  region: ap-northeast-2
-  gp_config: /home/gpadmin/s3.conf            # 1번에서 배포한 경로
-  file_size_mb: 128
-  compress: true
-  cleanup: true
+`bin/s3-ops` 로 올립니다. 접속 정보를 매번 주기 싫으면 `--config` 로 `conf/` 설정을
+재사용하세요.
 
-jobs:
-  - query: SELECT * FROM sales.orders WHERE dt = '2026-08-01'
-    target_table: orders
-    mode: truncate
-    load_method: s3
+```bash
+bin/s3-ops upload ./out/ s3://dw-stage/orders/2026-08-01/ --recursive
+bin/s3-ops --config conf/config.local.yaml ls s3://dw-stage/orders/2026-08-01/
 ```
 
-boto3 업로드 자격증명은 `access_key_id` / `secret_access_key` 로 직접 줄 수도 있고,
-생략하면 환경변수(`AWS_ACCESS_KEY_ID` 등)나 IAM 역할을 따릅니다.
+**실행 단위마다 별도 접두사를 쓰세요.** 외부 테이블 LOCATION은 접두사 아래 파일을
+전부 읽으므로, 여러 날짜의 파일이 한 디렉터리에 섞이면 의도하지 않은 데이터까지
+딸려옵니다. 위 예제처럼 날짜나 실행 ID를 경로에 넣는 편이 안전합니다.
 
-## 3. 실제로 만들어지는 SQL
-
-파이프라인이 생성하는 외부 테이블은 다음과 같은 형태입니다.
+## 3. 외부 테이블 작성
 
 ```sql
-CREATE READABLE EXTERNAL TEMP TABLE "ext_9f2c1a7b3e5d4088" (
-    "order_id" bigint,
-    "name" text,
-    "amount" numeric(18,2)
+CREATE READABLE EXTERNAL TABLE ext_orders_20260801 (
+    order_id  bigint,
+    name      text,
+    amount    numeric(18,2)
 )
-LOCATION ('s3://s3.ap-northeast-2.amazonaws.com/dw-stage/impala-to-greenplum/orders-9f2c1a7b3e5d4088/ region=ap-northeast-2 config=/home/gpadmin/s3.conf')
+LOCATION ('s3://s3.ap-northeast-2.amazonaws.com/dw-stage/orders/2026-08-01/ region=ap-northeast-2 config=/home/gpadmin/s3.conf')
 FORMAT 'TEXT' (DELIMITER E'\t' NULL E'\\N' ESCAPE E'\\')
 ENCODING 'UTF8';
 
-INSERT INTO "staging"."orders" ("order_id", "name", "amount")
-SELECT "order_id", "name", "amount" FROM "ext_9f2c1a7b3e5d4088";
+INSERT INTO staging.orders (order_id, name, amount)
+SELECT order_id, name, amount FROM ext_orders_20260801;
+
+DROP EXTERNAL TABLE ext_orders_20260801;
 ```
 
 몇 가지 짚어둘 점이 있습니다.
 
-- 외부 테이블 컬럼 타입은 **대상 테이블의 실제 타입** 을 그대로 따라갑니다. 그래야
+- **`FORMAT` 절은 파일을 만든 옵션과 맞아야 합니다.** `query-to-csv` 의 기본 구분자는
+  백틱(`` ` ``)이고 NULL은 빈 문자열입니다. 위 SQL처럼 TEXT 포맷으로 읽으려면 파일을
+  뽑을 때 `--delimiter $'\t' --null-string '\N'` 을 주는 편이 편합니다. 헤더 행을
+  넣었다면 `--no-header` 로 빼거나, `FORMAT 'CSV' (HEADER)` 로 읽어야 합니다.
+- 외부 테이블 컬럼 타입은 **대상 테이블의 실제 타입** 을 그대로 따라가세요. 그래야
   `INSERT ... SELECT` 에서 불필요한 캐스팅이나 타입 불일치가 생기지 않습니다.
-- 실행마다 `{prefix}/{테이블명}-{난수}/` 아래에 파일을 올리므로, 같은 버킷에서 여러
-  작업이 동시에 돌아도 서로의 파일을 읽지 않습니다.
-- 파일 포맷은 COPY TEXT와 동일합니다(탭 구분, `\N` NULL). `.gz` 확장자는 Greenplum이
-  보고 알아서 풀어 읽습니다.
-- 외부 테이블은 임시 테이블로 만들어 세션이 끝나면 사라지고, 적재 직후 명시적으로
-  DROP합니다. `use_temp_external_table: false` 로 두면 `greenplum.schema` 에
-  일반 테이블로 만듭니다.
+- LOCATION의 접두사는 슬래시로 끝내야 그 아래 파일을 모두 읽습니다.
+- `.gz` 확장자는 Greenplum이 보고 알아서 풀어 읽습니다. `--gzip` 으로 뽑은 파일을
+  그대로 올리면 됩니다.
+- 세션 안에서만 쓸 거라면 `CREATE READABLE EXTERNAL TEMP TABLE` 로 만들어 세션이
+  끝날 때 사라지게 하는 편이 뒷정리가 쉽습니다.
 
 ## 4. 파일 개수와 병렬성
 
 **가장 중요한 튜닝 포인트입니다.** Greenplum은 S3 오브젝트를 세그먼트에 나눠
 할당하므로, 파일이 하나면 세그먼트 하나만 일합니다.
 
-파일 개수는 `file_size_mb` 로 조절합니다. 총 데이터가 10GB이고 `file_size_mb: 128`
-이면 약 80개 파일이 생기므로, 세그먼트가 16대여도 충분히 고르게 퍼집니다. 반대로
-총 1GB인데 `file_size_mb: 1024` 로 두면 파일이 하나뿐이라 병렬성이 사라집니다.
+`query-to-csv` 는 결과를 파일 하나로 씁니다. 세그먼트를 다 쓰려면 쿼리를 파티션
+조건으로 쪼개 여러 번 실행해 파일을 나누세요.
 
-파이프라인은 파일 수가 세그먼트 수보다 적으면 경고를 남깁니다.
+```bash
+for dt in 2026-08-01 2026-08-02 2026-08-03; do
+    bin/query-to-csv --host impala.example.com --user etl_user \
+        --query "SELECT * FROM sales.orders WHERE dt = '$dt'" \
+        --output "out/orders-$dt.csv.gz" --gzip --delimiter $'\t' --null-string '\N'
+done
+bin/s3-ops upload ./out/ s3://dw-stage/orders/202608/ --recursive
+```
 
-```
-WARNING S3 파일이 3개뿐이라 세그먼트 16개를 다 쓰지 못합니다.
-        s3.file_size_mb를 줄이면 파일이 더 잘게 나뉩니다.
-```
+총 데이터가 10GB일 때 파일이 80개면 세그먼트가 16대여도 충분히 고르게 퍼집니다.
+반대로 파일이 3개뿐이면 나머지 13대는 놀게 됩니다.
 
 세그먼트 수는 다음으로 확인합니다.
 
@@ -131,50 +140,58 @@ WARNING S3 파일이 3개뿐이라 세그먼트 16개를 다 쓰지 못합니다
 SELECT count(*) FROM gp_segment_configuration WHERE content >= 0 AND role = 'p';
 ```
 
-## 5. 정리와 실패 처리
+올라간 파일 개수와 크기 분포는 `bin/s3-ops ls` 로 확인할 수 있습니다.
 
-- `cleanup: true`(기본)면 적재 성공/실패와 무관하게 이 실행이 올린 오브젝트를
-  삭제합니다. 접두사 전체가 아니라 **실제로 올린 키만** 지우므로 같은 버킷을 쓰는
-  다른 작업의 파일은 건드리지 않습니다.
-- 업로드 도중 실패한 경우에도 이미 올라간 파일은 정리 대상에 포함됩니다.
-- 디버깅할 때는 `cleanup: false` 로 두고 파일을 직접 열어보세요. 목록을 확인하는
-  방법은 [boto3로 S3 버킷·파일 목록 보기](boto3.md)에 정리해 두었습니다.
-- Greenplum 쪽 적재는 한 트랜잭션이라 실패 시 롤백됩니다. S3 파일만 정리하면
-  깨끗한 상태로 되돌아갑니다.
+## 5. 정리
+
+적재가 끝나면 S3 파일을 지웁니다. 접두사를 실행 단위로 나눠 뒀다면 그 디렉터리만
+통째로 지우면 됩니다.
+
+```bash
+bin/s3-ops rmdir s3://dw-stage/orders/2026-08-01/          # 지울 목록을 보여주고 물어봅니다
+bin/s3-ops rmdir s3://dw-stage/orders/2026-08-01/ --yes    # 확인 없이
+```
+
+`rmdir` 은 그 접두사로 시작하는 오브젝트를 **전부** 지웁니다. 접두사가 비어 있으면
+(`s3://버킷/`) 버킷 전체 삭제를 막기 위해 거부합니다.
+
+디버깅할 때는 지우지 말고 파일을 직접 열어보세요. 목록과 내용을 확인하는 방법은
+[boto3로 S3 버킷·파일 목록 보기](boto3.md)에 정리해 두었습니다.
+
+Greenplum 쪽 `INSERT ... SELECT` 는 한 트랜잭션이라 실패하면 롤백됩니다. S3 파일만
+정리하면 깨끗한 상태로 되돌아갑니다.
 
 ## 6. 형식 오류 허용
 
-원본에 깨진 값이 섞여 있어 일부 행을 버리고 진행하고 싶다면:
-
-```yaml
-s3:
-  segment_reject_limit: 100
-```
-
-`LOG ERRORS SEGMENT REJECT LIMIT 100 ROWS` 가 붙어 100건까지는 오류 행을 건너뜁니다.
-버려진 행은 다음으로 확인합니다.
+원본에 깨진 값이 섞여 있어 일부 행을 버리고 진행하고 싶다면 외부 테이블에
+`LOG ERRORS` 를 붙입니다.
 
 ```sql
-SELECT * FROM gp_read_error_log('ext_9f2c1a7b3e5d4088');
+CREATE READABLE EXTERNAL TABLE ext_orders_20260801 (...)
+LOCATION (...)
+FORMAT 'TEXT' (DELIMITER E'\t' NULL E'\\N' ESCAPE E'\\')
+LOG ERRORS SEGMENT REJECT LIMIT 100 ROWS;
 ```
 
-기본값 0은 오류가 하나라도 나면 즉시 실패입니다. 데이터 정합성이 중요하면 기본값을
-그대로 두세요.
+100건까지는 오류 행을 건너뜁니다. 버려진 행은 다음으로 확인합니다.
+
+```sql
+SELECT * FROM gp_read_error_log('ext_orders_20260801');
+```
+
+`LOG ERRORS` 를 붙이지 않으면 오류가 하나라도 나면 즉시 실패합니다. 데이터 정합성이
+중요하면 붙이지 마세요.
 
 ## PXF를 쓰는 경우
 
-내장 `s3` 프로토콜 대신 PXF가 이미 구축되어 있다면:
+내장 `s3` 프로토콜 대신 PXF가 이미 구축되어 있다면 LOCATION만 바뀝니다.
 
-```yaml
-s3:
-  bucket: dw-stage
-  protocol: pxf
-  pxf_server: s3srv
+```sql
+LOCATION ('pxf://dw-stage/orders/2026-08-01/?PROFILE=s3:text&SERVER=s3srv')
 ```
 
-LOCATION이 `pxf://dw-stage/{prefix}/{run}/?PROFILE=s3:text&SERVER=s3srv` 형태로
-바뀝니다. `endpoint` 나 `gp_config` 는 필요 없고, 대신 PXF 서버 쪽
-`s3-site.xml` 에 자격증명이 설정되어 있어야 합니다.
+`endpoint` 나 `config=` 는 필요 없고, 대신 PXF 서버 쪽 `s3-site.xml` 에 자격증명이
+설정되어 있어야 합니다.
 
 프로파일 정의(`pxf-profiles.xml`), 서버 설정(`s3-site.xml`), 외부 테이블 LOCATION이
 각각 어떤 역할을 하는지는 [PXF로 S3 읽기 설정](pxf.md)에 정리해 두었습니다.

@@ -81,10 +81,13 @@ bin/s3-ops --config conf/config.local.yaml ls s3://dw-stage/
 
 ## 문서
 
-- [S3 외부 테이블 적재 설정](docs/s3_external_table.md) — `s3.conf` 배포, 파일 분할, 오류 허용
+올린 파일을 Greenplum에서 읽어들이는 쪽은 이 저장소의 코드가 아니라 Greenplum
+설정입니다. 그 절차를 따로 정리해 두었습니다.
+
+- [S3 외부 테이블로 읽기](docs/s3_external_table.md) — `s3.conf` 배포, 외부 테이블 작성, 파일 분할, 오류 허용
 - [PXF로 S3 읽기 설정](docs/pxf.md) — `pxf-profiles.xml`, `s3-site.xml`, 외부 테이블 LOCATION
 - [분산키 선정 가이드](docs/distribution_key.md) — 후보 컬럼 진단 쿼리
-- [boto3로 S3 버킷·파일 목록 보기](docs/boto3.md) — 버킷 확인, 스테이징 파일 조회, 찌꺼기 정리
+- [boto3로 S3 버킷·파일 목록 보기](docs/boto3.md) — 버킷 확인, 올린 파일 조회, 찌꺼기 정리
 
 ## 테스트
 
@@ -168,7 +171,6 @@ boto3 기본 자격증명 체인(`AWS_ACCESS_KEY_ID` 등, IAM 역할)이 그대�
 
 ## Impala 쿼리를 CSV로 내려받기
 
-Greenplum 적재와 별개로, Impala 결과를 파일로 뽑아야 할 때가 있습니다.
 `src/query_to_csv.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
 시간을 썼는지 보여줍니다.
 
