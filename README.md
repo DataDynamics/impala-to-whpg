@@ -143,6 +143,7 @@ bin/impala-query [접속] (-q SQL | -f FILE.sql) [-V KEY=VALUE ...] [-o OUTPUT] 
 | 출력 | `-o/--output` `--gzip` `--delimiter` `--quote` `--escapechar` `--encoding` `--no-header` `--null-string` `--max-rows` `--batch-size` |
 
 `--debug`는 실행할 SQL과 SASL 핸드셰이크 로그를 출력합니다.
+각 옵션을 왜 그렇게 뒀는지는 [Impala에 쿼리 실행하기](#impala에-쿼리-실행하기)에 있습니다.
 
 ```bash
 bin/impala-query -f daily_orders.sql -V dt=2026-08-01                    # 표
@@ -164,6 +165,7 @@ bin/gp-query [접속] (-q SQL | -f FILE.sql) [-V KEY=VALUE ...] [-o OUTPUT] [--d
 | 출력 | `-o/--output` `--gzip` `--delimiter` `--encoding` `--no-header` `--null-string` `--max-rows` |
 
 `--debug`는 템플릿을 채운 뒤 실제로 보내는 SQL을 출력합니다.
+트랜잭션 동작은 [Greenplum에 SQL 실행하기](#greenplum에-sql-실행하기)에 있습니다.
 
 ```bash
 bin/gp-query -f order_summary.sql -V dt=2026-08-01        # 표
@@ -209,7 +211,8 @@ bin/s3-ops rmdir    s3://dw-stage/orders/ --older-than 7d --yes
 ```
 
 `-n`/`--dry-run`은 무엇을 할지만 보여주고 실행하지 않습니다. 삭제·이동 전에
-확인할 때 쓰세요.
+확인할 때 쓰세요. 각 명령의 동작과 안전장치는 [S3 파일 다루기](#s3-파일-다루기)에
+있습니다.
 
 ### 종료 코드
 
