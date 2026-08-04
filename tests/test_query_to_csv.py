@@ -880,6 +880,32 @@ def test_nosasl_does_not_need_a_user(tmp_path):
     assert args.user is None
 
 
+# -- 인자 없이 실행 ---------------------------------------------------------------
+
+
+def test_no_arguments_prints_help(capsys):
+    """인자 없이 실행하면 오류가 아니라 도움말을 보여준다."""
+    assert q.main([]) == 0
+    output = capsys.readouterr().out
+    assert "usage: bin/query-to-csv" in output
+    assert "--query-file" in output
+
+
+def test_no_arguments_does_not_read_the_config(tmp_path, monkeypatch, capsys):
+    """설정 파일이 깨져 있어도 도움말은 떠야 한다."""
+    broken = tmp_path / "config.yaml"
+    broken.write_text("impala: [이건: 매핑이: 아니다", encoding="utf-8")
+    monkeypatch.setattr(q.appconfig, "DEFAULT_CONFIG", broken)
+
+    assert q.main([]) == 0
+    assert "usage: bin/query-to-csv" in capsys.readouterr().out
+
+
+def test_help_lists_examples(capsys):
+    q.main([])
+    assert "예시:" in capsys.readouterr().out
+
+
 # -- SQL 템플릿 -------------------------------------------------------------------
 
 

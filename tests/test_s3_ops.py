@@ -391,6 +391,33 @@ def test_shipped_default_config_is_readable():
     assert settings["bucket"]
 
 
+# -- 인자 없이 실행 ---------------------------------------------------------------
+
+
+def test_no_arguments_prints_help(capsys):
+    """인자 없이 실행하면 오류가 아니라 도움말을 보여준다."""
+    assert s.main([]) == 0
+    output = capsys.readouterr().out
+    assert "usage: bin/s3-ops" in output
+    assert "{ls,upload,mkdir,rm,rmdir}" in output
+
+
+def test_no_arguments_does_not_build_a_client(monkeypatch, capsys):
+    """도움말만 볼 때 boto3나 설정 파일을 건드리지 않아야 한다."""
+
+    def fail(*args, **kwargs):
+        raise AssertionError("도움말만 보는데 클라이언트를 만들면 안 된다")
+
+    monkeypatch.setattr(s, "make_client", fail)
+    assert s.main([]) == 0
+    assert "usage: bin/s3-ops" in capsys.readouterr().out
+
+
+def test_help_examples_use_the_bin_name(capsys):
+    s.main([])
+    assert "bin/s3-ops ls" in capsys.readouterr().out
+
+
 # -- 목록 -------------------------------------------------------------------------
 
 

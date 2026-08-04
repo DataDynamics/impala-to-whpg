@@ -331,19 +331,19 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "예시:\n"
-            "  s3_ops.py ls     s3://dw-stage/impala/\n"
-            "  s3_ops.py upload orders.csv s3://dw-stage/impala/\n"
-            "  s3_ops.py upload ./out/ s3://dw-stage/impala/out/ --recursive\n"
-            "  s3_ops.py mkdir  s3://dw-stage/impala/2026-08-03/\n"
-            "  s3_ops.py rm     s3://dw-stage/impala/orders.csv --yes\n"
-            "  s3_ops.py rmdir  s3://dw-stage/impala/2026-08-03/ --yes\n"
+            "  bin/s3-ops ls     s3://dw-stage/impala/\n"
+            "  bin/s3-ops upload orders.csv s3://dw-stage/impala/\n"
+            "  bin/s3-ops upload ./out/ s3://dw-stage/impala/out/ --recursive\n"
+            "  bin/s3-ops mkdir  s3://dw-stage/impala/2026-08-03/\n"
+            "  bin/s3-ops rm     s3://dw-stage/impala/orders.csv --yes\n"
+            "  bin/s3-ops rmdir  s3://dw-stage/impala/2026-08-03/ --yes\n"
             "\n"
             "  # --bucket 을 주면 s3:// 없이 키만 써도 됩니다\n"
-            "  s3_ops.py --bucket dw-stage ls impala/\n"
+            "  bin/s3-ops --bucket dw-stage ls impala/\n"
             "\n"
             "  # MinIO 등 S3 호환 스토리지\n"
-            "  s3_ops.py --endpoint http://minio:9000 --bucket dw-stage \\\n"
-            "            --access-key minioadmin --secret-key minioadmin ls /\n"
+            "  bin/s3-ops --endpoint http://minio:9000 --bucket dw-stage \\\n"
+            "           --access-key minioadmin --secret-key minioadmin ls /\n"
             "\n"
             f"버킷과 자격증명은 {appconfig.DEFAULT_CONFIG} 의\n"
             "s3 섹션에서 자동으로 읽습니다. 아래 인자를 주면 그 값이 우선합니다.\n"
@@ -408,7 +408,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    # 인자 없이 실행하면 무엇을 할 수 있는지 보여준다. 오류가 아니므로 0으로 끝낸다.
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        parser.print_help()
+        return 0
+
+    args = parser.parse_args(argv)
     client, bucket = make_client(args)
     return COMMANDS[args.command](client, args, bucket)
 

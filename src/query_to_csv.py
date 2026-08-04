@@ -723,6 +723,24 @@ def build_parser() -> argparse.ArgumentParser:
         prog="bin/query-to-csv",
         description="Impala 쿼리 결과를 CSV로 저장하고 구간별 소요 시간을 표시합니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "예시:\n"
+            "  # sql/ 의 템플릿에 변수를 채워 실행\n"
+            "  bin/query-to-csv -f daily_orders.sql -V dt=2026-08-01 -o orders.csv\n"
+            "\n"
+            "  # 쿼리를 직접 주고 gzip으로 저장\n"
+            "  bin/query-to-csv -q \"SELECT * FROM sales.orders\" -o orders.csv.gz --gzip\n"
+            "\n"
+            "  # 설정을 무시하고 접속 정보를 전부 명령행으로\n"
+            "  bin/query-to-csv --no-config --host impala.example.com -u etl_user \\\n"
+            "                   -q \"SELECT 1\" -o out.csv\n"
+            "\n"
+            f"접속 정보는 {appconfig.DEFAULT_CONFIG} 의\n"
+            "impala 섹션에서 자동으로 읽습니다. 아래 인자를 주면 그 값이 우선합니다.\n"
+            "\n"
+            "비밀번호는 인자로 받지 않습니다. 설정의 impala.password, 환경변수\n"
+            "(기본 IMPALA_PASSWORD), 대화형 입력 순으로 찾습니다.\n"
+        ),
     )
     appconfig.add_config_arguments(parser)
 
@@ -837,6 +855,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
+    # 인자 없이 실행하면 무엇을 할 수 있는지 보여준다. 오류가 아니므로 0으로 끝낸다.
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        parser.print_help()
+        return 0
+
     args = parser.parse_args(argv)
     apply_config(args, load_impala_settings(args), parser, load_sql_settings(args))
     timer = PhaseTimer(PHASES)
