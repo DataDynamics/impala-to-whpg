@@ -297,7 +297,7 @@ pxf://dw-stage/orders/2026-08-01/?PROFILE=s3:text&SERVER=s3srv
 합니다.
 
 ```bash
-bin/query-to-csv --host impala.example.com --user etl_user \
+bin/query-to-csv \
     --query "SELECT order_id, name, amount FROM sales.orders WHERE dt = '2026-08-01'" \
     --output orders.csv.gz --gzip --delimiter $'\t' --null-string '\N' --no-header
 
@@ -308,7 +308,7 @@ bin/s3-ops upload orders.csv.gz s3://dw-stage/orders/2026-08-01/
 헤더가 없는 파일을 전제로 합니다.
 
 **올릴 때 쓰는 자격증명과 PXF가 읽을 때 쓰는 자격증명은 별개입니다.** 전자는
-`bin/s3-ops` 의 boto3 자격증명(`--config` 의 s3 섹션이나 환경변수)이고, 후자는 3번의
+`bin/s3-ops` 의 boto3 자격증명(`conf/config.yaml` 의 s3 섹션이나 환경변수)이고, 후자는 3번의
 `s3-site.xml` 입니다. 두 곳 모두 같은 버킷에 접근할 수 있어야 합니다.
 
 ## 6. 확인과 문제 해결

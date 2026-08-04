@@ -16,24 +16,23 @@ S3에는 디렉터리가 없다. 키가 ``a/b/c.csv`` 인 오브젝트가 있을
 
 삭제는 되돌릴 수 없으므로 ``--yes`` 없이는 지울 목록을 보여주고 물어본다.
 
-자격증명은 환경변수나 IAM 역할을 따른다. ``--config conf/config.yaml`` 을 주면
-프로젝트 설정의 s3 섹션(버킷, 자격증명, 엔드포인트)을 그대로 재사용한다.
+버킷과 자격증명은 conf/config.yaml 의 s3 섹션에서 자동으로 읽는다. 명령행으로 준
+값이 항상 우선하고, 둘 다 없으면 환경변수나 IAM 역할을 따른다. 다른 파일을 쓰려면
+``--config`` 를, 아예 읽지 않으려면 ``--no-config`` 를 준다.
 """
 
 import argparse
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import appconfig
+
 #: delete_objects 는 요청당 1000개까지만 받는다
 DELETE_BATCH = 1000
 
-#: ``${VAR}`` / ``${VAR:-default}`` 형태의 환경변수 참조
-ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
-
-#: 설정의 s3 섹션에서 읽어 쓰는 키. 나머지 키(적재 전용 옵션)는 무시한다.
+#: 설정의 s3 섹션에서 읽어 쓰는 키. 나머지 키는 무시한다.
 S3_SETTINGS = (
     "bucket",
     "region",
@@ -84,49 +83,13 @@ def resolve_target(uri: str, default_bucket: Optional[str]) -> Tuple[str, str]:
     return default_bucket, uri.lstrip("/")
 
 
-def expand_env(value: str) -> str:
-    """``${VAR}`` / ``${VAR:-default}`` 를 환경변수 값으로 치환한다.
-
-    설정 파일에 자격증명을 직접 적지 않고 환경변수로 넘길 수 있게 한다. 기본값
-    없이 참조한 변수가 정의되어 있지 않으면 빈 문자열로 조용히 넘어가지 않고
-    바로 알린다.
-    """
-    def replace(match: "re.Match[str]") -> str:
-        name, default = match.group(1), match.group(2)
-        resolved = os.environ.get(name, default)
-        if resolved is None:
-            raise SystemExit(f"환경변수 {name} 가 정의되지 않았습니다.")
-        return resolved
-
-    return ENV_PATTERN.sub(replace, value)
-
-
-def read_s3_settings(path: str) -> Dict[str, Optional[str]]:
+def read_s3_settings(path: str, required: bool = True) -> Dict[str, Optional[str]]:
     """YAML 설정 파일의 s3 섹션에서 접속에 필요한 값만 읽는다.
 
-    적재 파이프라인용 옵션(file_size_mb, protocol 등)은 이 스크립트와 무관하므로
-    그냥 건너뛴다. 그래서 같은 설정 파일을 검증 없이 그대로 쓸 수 있다.
+    이 스크립트와 무관한 키는 건너뛴다. 그래서 다른 스크립트와 같은 설정 파일을
+    나눠 쓸 수 있다.
     """
-    try:
-        import yaml
-    except ImportError:
-        raise SystemExit("--config 를 쓰려면 PyYAML 이 필요합니다.\n    pip install PyYAML")
-
-    try:
-        with open(path, "r", encoding="utf-8") as fp:
-            raw = yaml.safe_load(fp) or {}
-    except OSError as exc:
-        raise SystemExit(f"설정 파일을 읽을 수 없습니다: {exc}")
-
-    section = raw.get("s3")
-    if not section:
-        raise SystemExit(f"{path} 에 s3 섹션이 없습니다.")
-
-    settings: Dict[str, Optional[str]] = {}
-    for key in S3_SETTINGS:
-        value = section.get(key)
-        settings[key] = expand_env(value) if isinstance(value, str) else value
-    return settings
+    return appconfig.load_section(Path(path), "s3", S3_SETTINGS, required=required)
 
 
 def make_client(args: argparse.Namespace) -> Tuple[Any, Optional[str]]:
@@ -135,9 +98,12 @@ def make_client(args: argparse.Namespace) -> Tuple[Any, Optional[str]]:
     자격증명 우선순위는 명령행 > 설정 파일 > 환경변수/IAM 역할 순이다.
     ``--access-key`` 를 주지 않으면 boto3 기본 자격증명 체인이 그대로 동작한다.
     """
-    settings: Dict[str, Optional[str]] = {key: None for key in S3_SETTINGS}
-    if args.config:
-        settings.update(read_s3_settings(args.config))
+    path = appconfig.resolve_config_path(args)
+    # --config 로 직접 지정한 파일에 s3 섹션이 없으면 오타일 가능성이 높다.
+    # 기본 파일이라면 다른 스크립트용 설정만 들어 있을 수 있으니 넘어간다.
+    settings = appconfig.load_section(
+        path, "s3", S3_SETTINGS, required=bool(getattr(args, "config", None))
+    )
 
     # 명령행으로 준 값이 설정 파일보다 우선한다
     for key, given in (
@@ -378,12 +344,13 @@ def build_parser() -> argparse.ArgumentParser:
             "  # MinIO 등 S3 호환 스토리지\n"
             "  s3_ops.py --endpoint http://minio:9000 --bucket dw-stage \\\n"
             "            --access-key minioadmin --secret-key minioadmin ls /\n"
+            "\n"
+            f"버킷과 자격증명은 {appconfig.DEFAULT_CONFIG} 의\n"
+            "s3 섹션에서 자동으로 읽습니다. 아래 인자를 주면 그 값이 우선합니다.\n"
         ),
     )
+    appconfig.add_config_arguments(parser)
     connection = parser.add_argument_group("접속")
-    connection.add_argument(
-        "-c", "--config", help="프로젝트 설정 파일. s3 섹션의 접속 정보를 재사용합니다."
-    )
     connection.add_argument(
         "-b",
         "--bucket",

@@ -576,8 +576,8 @@ def test_parse_session_settings_rejects_malformed(bad):
 # -- 단독 실행 (프로젝트 패키지 비의존) --------------------------------------------
 
 
-def test_script_has_no_project_dependency():
-    """이 스크립트는 표준 라이브러리와 impyla만으로 돌아야 한다."""
+def test_script_has_no_unexpected_dependency():
+    """의존성은 impyla와 같은 디렉터리의 appconfig 로 한정한다."""
     import ast
 
     source = Path(q.__file__).read_text(encoding="utf-8")
@@ -593,12 +593,25 @@ def test_script_has_no_project_dependency():
         "logging", "os", "sys", "time", "typing", "unicodedata",
     }
     third_party = {
-        "impala",  # 유일한 필수 외부 의존성
-        "sasl",    # 선택: --sasl-backend sasl 일 때만 임포트한다
+        "impala",     # 유일한 필수 외부 의존성
+        "sasl",       # 선택: --sasl-backend sasl 일 때만 임포트한다
+        "appconfig",  # 같은 디렉터리의 설정 로더. PyYAML은 그쪽에서 지연 임포트한다.
     }
     assert modules <= stdlib | third_party, (
         f"허용되지 않은 의존성: {modules - stdlib - third_party}"
     )
+
+
+def test_yaml_is_not_imported_at_module_level():
+    """--no-config 로만 쓴다면 PyYAML 없이도 돌아야 한다."""
+    import ast
+
+    source = Path(q.__file__).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            assert all(a.name != "yaml" for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.module != "yaml"
 
 
 # -- impyla 임포트 진단 (스크립트 자체 구현) ---------------------------------------
@@ -765,6 +778,106 @@ def test_human_readable_size():
     assert q.human(0) == "0.0B"
     assert q.human(1536) == "1.5KB"
     assert q.human(5 * 1024**3) == "5.0GB"
+
+
+# -- 설정 파일 ---------------------------------------------------------------------
+
+
+def parsed(tmp_path, body: str, argv: List[str]):
+    """설정 파일을 기본 파일 자리에 놓고 인자를 파싱해 병합까지 마친다."""
+    path = tmp_path / "config.yaml"
+    path.write_text(body, encoding="utf-8")
+    original = q.appconfig.DEFAULT_CONFIG
+    q.appconfig.DEFAULT_CONFIG = path
+    try:
+        parser = q.build_parser()
+        args = parser.parse_args(argv + ["-q", "SELECT 1", "-o", "out.csv"])
+        q.apply_config(args, q.load_impala_settings(args), parser)
+        return args
+    finally:
+        q.appconfig.DEFAULT_CONFIG = original
+
+
+CONFIG = """\
+impala:
+  host: config-host
+  port: 21051
+  database: sales
+  user: config-user
+  auth_mechanism: PLAIN
+  use_ssl: true
+  ca_cert: /etc/ssl/ca.pem
+  session_settings:
+    MEM_LIMIT: 8g
+"""
+
+
+def test_config_fills_connection_arguments(tmp_path):
+    args = parsed(tmp_path, CONFIG, [])
+    assert args.host == "config-host"
+    assert args.port == 21051
+    assert args.database == "sales"
+    assert args.user == "config-user"
+    assert args.ca_cert == "/etc/ssl/ca.pem"
+    assert args.no_ssl is False
+
+
+def test_command_line_wins_over_config(tmp_path):
+    args = parsed(tmp_path, CONFIG, ["--host", "cli-host", "--port", "28000"])
+    assert args.host == "cli-host"
+    assert args.port == 28000
+    assert args.user == "config-user"      # 안 준 값은 설정에서 온다
+
+
+def test_no_config_ignores_the_file(tmp_path):
+    args = parsed(tmp_path, CONFIG, ["--no-config", "--host", "h", "-u", "u"])
+    assert args.host == "h"
+    assert args.database == "default"      # 설정이 아니라 기본값
+    assert args.port == 21050
+
+
+def test_config_use_ssl_false_turns_off_tls(tmp_path):
+    args = parsed(tmp_path, "impala:\n  host: h\n  user: u\n  use_ssl: false\n", [])
+    assert args.no_ssl is True
+
+
+def test_no_ssl_flag_is_not_overridden_by_config(tmp_path):
+    args = parsed(tmp_path, CONFIG, ["--no-ssl"])
+    assert args.no_ssl is True
+
+
+def test_config_session_settings_are_merged_before_set(tmp_path):
+    """--set 이 설정의 session_settings 를 덮어쓴다."""
+    args = parsed(tmp_path, CONFIG, ["--set", "MEM_LIMIT=16g", "--set", "NUM_NODES=1"])
+    assert q.parse_session_settings(args.set) == {"MEM_LIMIT": "16g", "NUM_NODES": "1"}
+
+
+def test_config_password_is_used(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_PW", "from-env-ref")
+    args = parsed(tmp_path, "impala:\n  host: h\n  user: u\n  password: ${TEST_PW}\n", [])
+    assert q.resolve_password(args) == "from-env-ref"
+
+
+def test_missing_host_is_reported(tmp_path):
+    with pytest.raises(SystemExit):
+        parsed(tmp_path, "impala:\n  user: u\n", [])
+
+
+def test_missing_user_is_reported(tmp_path):
+    with pytest.raises(SystemExit):
+        parsed(tmp_path, "impala:\n  host: h\n", [])
+
+
+def test_nosasl_does_not_need_a_user(tmp_path):
+    args = parsed(tmp_path, "impala:\n  host: h\n", ["--auth-mechanism", "NOSASL"])
+    assert args.user is None
+
+
+def test_shipped_default_config_has_an_impala_section(tmp_path):
+    """저장소에 커밋된 conf/config.yaml 이 실제로 파싱되는지 확인한다."""
+    parser = q.build_parser()
+    args = parser.parse_args(["-q", "SELECT 1", "-o", "out.csv"])
+    assert q.load_impala_settings(args)["host"]
 
 
 if __name__ == "__main__":

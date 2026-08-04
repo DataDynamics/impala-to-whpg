@@ -100,6 +100,7 @@ def args_for(command: str, **overrides) -> argparse.Namespace:
     options = dict(
         command=command,
         config=None,
+        no_config=True,       # 테스트는 기본 설정 파일을 읽지 않는다
         bucket=None,
         access_key=None,
         secret_key=None,
@@ -210,7 +211,7 @@ def test_credentials_are_passed_to_boto3(fake_boto3):
 
 def test_missing_credentials_fall_back_to_boto3_chain(fake_boto3):
     """키를 주지 않으면 None이 넘어가 환경변수/IAM 역할이 그대로 쓰인다."""
-    s.make_client(args_for("ls"))
+    s.make_client(args_for("ls"))   # no_config=True
 
     assert fake_boto3["session"] == {
         "aws_access_key_id": None,
@@ -256,6 +257,7 @@ def test_config_values_are_overridden_by_flags(tmp_path, fake_boto3):
         args_for(
             "ls",
             config=path,
+            no_config=False,
             access_key="cli-key",
             endpoint="http://minio:9000",
             bucket="cli-bucket",
@@ -272,7 +274,7 @@ def test_config_values_are_overridden_by_flags(tmp_path, fake_boto3):
 def test_config_bucket_is_used_when_flag_is_absent(tmp_path, fake_boto3):
     path = write_config(tmp_path, "s3:\n  bucket: from-config\n")
 
-    _, bucket = s.make_client(args_for("ls", config=path))
+    _, bucket = s.make_client(args_for("ls", config=path, no_config=False))
     assert bucket == "from-config"
 
 
@@ -288,7 +290,7 @@ def test_config_ignores_load_only_settings(tmp_path, fake_boto3):
         "  cleanup: false\n",
     )
 
-    _, bucket = s.make_client(args_for("ls", config=path))
+    _, bucket = s.make_client(args_for("ls", config=path, no_config=False))
     assert bucket == "dw-stage"
     assert fake_boto3["session"]["aws_access_key_id"] is None  # 기본 자격증명 체인에 맡긴다
 
@@ -303,28 +305,90 @@ def test_config_expands_environment_variables(tmp_path, fake_boto3, monkeypatch)
         "  region: ${TEST_S3_REGION:-ap-northeast-2}\n",
     )
 
-    s.make_client(args_for("ls", config=path))
+    s.make_client(args_for("ls", config=path, no_config=False))
     assert fake_boto3["session"]["aws_access_key_id"] == "env-key"
     assert fake_boto3["session"]["region_name"] == "ap-northeast-2"  # 기본값
 
 
-def test_config_undefined_environment_variable_fails(tmp_path, fake_boto3, monkeypatch):
+def test_config_undefined_environment_variable_is_skipped(
+    tmp_path, fake_boto3, monkeypatch, capsys
+):
+    """정의되지 않은 환경변수를 참조한 값은 없는 것으로 치고 경고만 남긴다.
+
+    설정 파일을 늘 읽기 때문에, 이 명령과 무관한 항목의 환경변수 하나가 비어
+    있다고 실행이 막히면 곤란하다.
+    """
     monkeypatch.delenv("TEST_S3_MISSING", raising=False)
     path = write_config(
         tmp_path, "s3:\n  bucket: dw-stage\n  access_key_id: ${TEST_S3_MISSING}\n"
     )
 
-    with pytest.raises(SystemExit) as exc:
-        s.make_client(args_for("ls", config=path))
-    assert "TEST_S3_MISSING" in str(exc.value)
+    _, bucket = s.make_client(args_for("ls", config=path, no_config=False))
+
+    assert bucket == "dw-stage"                                  # 나머지 값은 살아 있다
+    assert fake_boto3["session"]["aws_access_key_id"] is None     # 이 값만 건너뛴다
+    assert "TEST_S3_MISSING" in capsys.readouterr().err
 
 
-def test_config_without_s3_section_fails(tmp_path, fake_boto3):
+def test_explicit_config_without_s3_section_fails(tmp_path, fake_boto3):
+    """--config 로 직접 지정한 파일에 s3 섹션이 없으면 오타일 가능성이 높다."""
     path = write_config(tmp_path, "impala:\n  host: impala.example.com\n")
 
     with pytest.raises(SystemExit) as exc:
-        s.make_client(args_for("ls", config=path))
+        s.make_client(args_for("ls", config=path, no_config=False))
     assert "s3 섹션" in str(exc.value)
+
+
+def test_explicit_config_missing_file_fails(tmp_path, fake_boto3):
+    with pytest.raises(SystemExit) as exc:
+        s.make_client(args_for("ls", config=str(tmp_path / "없는파일.yaml"), no_config=False))
+    assert "찾을 수 없습니다" in str(exc.value)
+
+
+# -- 기본 설정 파일 ---------------------------------------------------------------
+
+
+def test_default_config_is_loaded_without_any_flag(tmp_path, fake_boto3, monkeypatch):
+    """아무 인자도 주지 않으면 conf/config.yaml 을 읽는다."""
+    path = tmp_path / "config.yaml"
+    path.write_text("s3:\n  bucket: from-default-config\n", encoding="utf-8")
+    monkeypatch.setattr(s.appconfig, "DEFAULT_CONFIG", path)
+
+    _, bucket = s.make_client(args_for("ls", no_config=False))
+    assert bucket == "from-default-config"
+
+
+def test_default_config_without_s3_section_is_ignored(tmp_path, fake_boto3, monkeypatch):
+    """기본 파일에는 다른 스크립트용 설정만 있을 수 있으므로 그냥 넘어간다."""
+    path = tmp_path / "config.yaml"
+    path.write_text("impala:\n  host: impala.example.com\n", encoding="utf-8")
+    monkeypatch.setattr(s.appconfig, "DEFAULT_CONFIG", path)
+
+    _, bucket = s.make_client(args_for("ls", no_config=False))
+    assert bucket is None
+
+
+def test_missing_default_config_is_not_an_error(tmp_path, fake_boto3, monkeypatch):
+    monkeypatch.setattr(s.appconfig, "DEFAULT_CONFIG", tmp_path / "없음.yaml")
+
+    _, bucket = s.make_client(args_for("ls", no_config=False))
+    assert bucket is None
+
+
+def test_no_config_skips_the_default_file(tmp_path, fake_boto3, monkeypatch):
+    path = tmp_path / "config.yaml"
+    path.write_text("s3:\n  bucket: from-default-config\n", encoding="utf-8")
+    monkeypatch.setattr(s.appconfig, "DEFAULT_CONFIG", path)
+
+    _, bucket = s.make_client(args_for("ls", no_config=True))
+    assert bucket is None
+
+
+def test_shipped_default_config_is_readable():
+    """저장소에 커밋된 conf/config.yaml 이 실제로 파싱되는지 확인한다."""
+    assert s.appconfig.DEFAULT_CONFIG.is_file()
+    settings = s.read_s3_settings(str(s.appconfig.DEFAULT_CONFIG))
+    assert settings["bucket"]
 
 
 # -- 목록 -------------------------------------------------------------------------

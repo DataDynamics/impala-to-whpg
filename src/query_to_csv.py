@@ -2,27 +2,32 @@
 
 TLS(SSL) 위에서 LDAP 인증(auth_mechanism=PLAIN)으로 접속하는 구성을 전제로 한다.
 
-이 스크립트는 **단독으로 동작한다.** 표준 라이브러리와 impyla 외에는 아무것도
-필요하지 않으므로, 이 파일 하나만 다른 곳으로 복사해서 써도 된다.
+접속 정보는 conf/config.yaml 의 impala 섹션에서 자동으로 읽는다. 명령행으로 준 값이
+항상 우선하므로, 설정을 채워두면 쿼리와 출력 경로만 주면 된다.
 
-    pip install impyla pure-sasl thrift-sasl
+    pip install impyla pure-sasl thrift-sasl PyYAML
     # "Failed building wheel for pure-sasl" 이 나면
     #     pip install --use-pep517 pure-sasl thrift-sasl
 
-    export IMPALA_PASSWORD='...'
+    # 설정 파일에 접속 정보가 있을 때
     bin/query-to-csv \
-        --host impala.example.com \
-        --user etl_user \
-        --ca-cert /etc/ssl/certs/impala-ca.pem \
         --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
         --output orders.csv
 
-    # 쿼리를 파일에서 읽고 gzip으로 압축해 저장
-    bin/query-to-csv --host impala.example.com --user etl_user \
+    # 설정을 무시하고 전부 명령행으로
+    export IMPALA_PASSWORD='...'
+    bin/query-to-csv --no-config \
+        --host impala.example.com \
+        --user etl_user \
+        --ca-cert /etc/ssl/certs/impala-ca.pem \
         --query-file daily_orders.sql --output orders.csv.gz --gzip
 
+외부 의존성은 impyla 와 PyYAML 뿐이고, 같은 디렉터리의 appconfig 모듈을 함께
+쓴다. PyYAML 은 설정 파일을 실제로 읽을 때만 임포트하므로 ``--no-config`` 로
+돌린다면 없어도 된다.
+
 비밀번호는 명령행 인자로 받지 않는다. ps로 다른 사용자에게 노출되기 때문에
-환경변수(기본 IMPALA_PASSWORD)나 대화형 입력으로만 받는다.
+설정 파일(보통 ``${IMPALA_PASSWORD}`` 참조), 환경변수, 대화형 입력으로만 받는다.
 """
 
 import argparse
@@ -36,6 +41,8 @@ import sys
 import time
 import unicodedata
 from typing import Any, Dict, Iterator, List, Optional, Sequence, TextIO
+
+import appconfig
 
 _INSTALL_HINT = (
     "impyla가 설치되어 있지 않습니다.\n"
@@ -384,14 +391,20 @@ def parse_session_settings(items: Sequence[str]) -> Dict[str, str]:
 
 
 def resolve_password(args: argparse.Namespace) -> str:
-    """환경변수 또는 대화형 입력으로 비밀번호를 얻는다."""
-    password = os.environ.get(args.password_env)
+    """설정 파일, 환경변수, 대화형 입력 순으로 비밀번호를 얻는다.
+
+    설정의 impala.password 는 보통 ``${IMPALA_PASSWORD}`` 형태로 환경변수를
+    가리킨다. 어느 경로든 명령행 인자로는 받지 않는다. ps 로 다른 사용자에게
+    보이기 때문이다.
+    """
+    password = getattr(args, "config_password", None) or os.environ.get(args.password_env)
     if password:
         return password
     if sys.stdin.isatty():
         return getpass.getpass(f"{args.user}@{args.host} 비밀번호: ")
     raise SystemExit(
-        f"비밀번호를 찾을 수 없습니다. 환경변수 {args.password_env} 를 설정하세요."
+        f"비밀번호를 찾을 수 없습니다. 환경변수 {args.password_env} 를 설정하거나 "
+        "설정의 impala.password 를 채우세요."
     )
 
 
@@ -494,17 +507,90 @@ def human(size: float) -> str:
     return f"{size:,.1f}GB"
 
 
+#: 설정의 impala 섹션에서 읽어 쓰는 키. 나머지 키는 무시한다.
+IMPALA_SETTINGS = (
+    "host",
+    "port",
+    "database",
+    "user",
+    "password",
+    "auth_mechanism",
+    "kerberos_service_name",
+    "use_ssl",
+    "ca_cert",
+    "timeout",
+    "session_settings",
+)
+
+
+def load_impala_settings(args: argparse.Namespace) -> Dict[str, Any]:
+    """설정 파일의 impala 섹션을 읽는다.
+
+    ``--config`` 로 파일을 직접 지정했는데 impala 섹션이 없으면 오타일 가능성이
+    높으므로 알린다. 기본 파일이라면 다른 스크립트용 설정만 들어 있을 수 있으니
+    넘어간다.
+    """
+    path = appconfig.resolve_config_path(args)
+    return appconfig.load_section(
+        path, "impala", IMPALA_SETTINGS, required=bool(args.config)
+    )
+
+
+def apply_config(
+    args: argparse.Namespace, config: Dict[str, Any], parser: argparse.ArgumentParser
+) -> None:
+    """설정 파일 값을 args 에 채운다. 명령행으로 준 값이 항상 우선한다.
+
+    설정에 없고 명령행에도 없는 값은 각 항목의 기본값으로 떨어진다. 접속에 반드시
+    필요한 host 와 user 만 끝까지 비어 있으면 오류다.
+    """
+    args.host = appconfig.pick(args.host, config["host"])
+    args.port = int(appconfig.pick(args.port, config["port"], 21050))
+    args.database = appconfig.pick(args.database, config["database"], "default")
+    args.user = appconfig.pick(args.user, config["user"])
+    args.auth_mechanism = appconfig.pick(
+        args.auth_mechanism, config["auth_mechanism"], AUTH_MECHANISM
+    )
+    args.kerberos_service_name = appconfig.pick(
+        args.kerberos_service_name, config["kerberos_service_name"], "impala"
+    )
+    args.ca_cert = appconfig.pick(args.ca_cert, config["ca_cert"])
+    args.timeout = appconfig.pick(args.timeout, config["timeout"])
+
+    # --no-ssl 은 store_true 라 "주지 않음"과 False 를 구분할 수 없다. 플래그를
+    # 주지 않았을 때만 설정의 use_ssl 을 본다.
+    if not args.no_ssl and config["use_ssl"] is False:
+        args.no_ssl = True
+
+    # 설정의 session_settings 를 --set 보다 앞에 둬서 명령행이 덮어쓰게 한다
+    settings = config["session_settings"]
+    if isinstance(settings, dict):
+        args.set = [f"{k}={v}" for k, v in settings.items()] + list(args.set)
+
+    # 비밀번호는 설정 > 환경변수 > 대화형 입력 순으로 찾는다
+    args.config_password = config["password"] or None
+
+    if args.auth_mechanism != NO_AUTH and not args.user:
+        parser.error("사용자를 알 수 없습니다. -u/--user 를 주거나 설정의 impala.user 를 채우세요.")
+    if not args.host:
+        parser.error("호스트를 알 수 없습니다. --host 를 주거나 설정의 impala.host 를 채우세요.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bin/query-to-csv",
         description="Impala 쿼리 결과를 CSV로 저장하고 구간별 소요 시간을 표시합니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    appconfig.add_config_arguments(parser)
+
+    # 설정 파일에서 채울 수 있는 값은 기본값을 None 으로 둔다. 그래야 사용자가
+    # 직접 준 값과 argparse 기본값을 구분해 우선순위를 매길 수 있다.
     conn = parser.add_argument_group("접속 (TLS + LDAP)")
-    conn.add_argument("--host", required=True, help="Impala 데몬 호스트")
-    conn.add_argument("--port", type=int, default=21050, help="기본 21050")
-    conn.add_argument("-d", "--database", default="default")
-    conn.add_argument("-u", "--user", required=True, help="LDAP 사용자")
+    conn.add_argument("--host", help="Impala 데몬 호스트")
+    conn.add_argument("--port", type=int, help="기본 21050")
+    conn.add_argument("-d", "--database")
+    conn.add_argument("-u", "--user", help="LDAP 사용자")
     conn.add_argument(
         "--password-env",
         default="IMPALA_PASSWORD",
@@ -515,13 +601,11 @@ def build_parser() -> argparse.ArgumentParser:
     conn.add_argument("--timeout", type=int, help="접속 타임아웃(초)")
     conn.add_argument(
         "--auth-mechanism",
-        default=AUTH_MECHANISM,
         choices=["PLAIN", "LDAP", "NOSASL", "GSSAPI"],
-        help="PLAIN/LDAP=LDAP 인증(기본), NOSASL=인증 없음, GSSAPI=Kerberos",
+        help=f"PLAIN/LDAP=LDAP 인증(기본 {AUTH_MECHANISM}), NOSASL=인증 없음, GSSAPI=Kerberos",
     )
     conn.add_argument(
         "--kerberos-service-name",
-        default="impala",
         help="GSSAPI일 때 쓸 서비스명 (기본 impala)",
     )
     conn.add_argument("--no-ssl", action="store_true", help="TLS를 끄고 평문으로 접속")
@@ -593,7 +677,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    config = load_impala_settings(args)
+    apply_config(args, config, parser)
     timer = PhaseTimer(PHASES)
 
     query = read_query(args)

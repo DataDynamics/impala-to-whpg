@@ -21,8 +21,8 @@ pip install -r requirements.txt
 
 | 도구 | 필요한 패키지 |
 | --- | --- |
-| `query-to-csv` | `impyla` (+ LDAP/Kerberos 인증 시 `pure-sasl`, `thrift-sasl`) |
-| `s3-ops` | `boto3` (+ `--config` 를 쓸 때만 `PyYAML`) |
+| `query-to-csv` | `impyla`, `PyYAML` (+ LDAP/Kerberos 인증 시 `pure-sasl`, `thrift-sasl`) |
+| `s3-ops` | `boto3`, `PyYAML` |
 
 `pure-sasl`, `thrift-sasl`은 **LDAP(PLAIN)과 Kerberos(GSSAPI) 인증 모두에 필요합니다.**
 impyla는 `auth_mechanism`이 `NOSASL`이 아니면 접속하는 순간 이 둘을 불러옵니다.
@@ -41,43 +41,69 @@ impyla는 `auth_mechanism`이 `NOSASL`이 아니면 접속하는 순간 이 둘�
 
 ## 빠른 시작
 
+**`bin/` 아래 스크립트는 아무것도 지정하지 않아도 `conf/config.yaml`을 읽습니다.**
+접속 정보를 한 번 채워두면 명령마다 반복해서 줄 필요가 없습니다.
+
 ```bash
-# Impala 쿼리 결과를 CSV로
+# 설정 파일의 ${...} 가 참조하는 환경변수를 먼저 채웁니다
+export IMPALA_USER='etl_user'
 export IMPALA_PASSWORD='...'
-bin/query-to-csv --host impala.example.com --user etl_user \
-    --ca-cert /etc/ssl/certs/impala-ca.pem \
+export AWS_ACCESS_KEY_ID='...'
+export AWS_SECRET_ACCESS_KEY='...'
+
+# 접속 정보는 설정에서 오므로 쿼리와 출력 경로만 주면 됩니다
+bin/query-to-csv \
     --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
     --output orders.csv
 
-# S3 목록 확인
-bin/s3-ops ls s3://dw-stage/impala/
+# 버킷도 설정에서 옵니다
+bin/s3-ops ls orders/
 ```
 
-`s3-ops`의 접속 정보는 매번 인자로 주는 대신 설정 파일에 담아둘 수 있습니다.
+경로는 스크립트 위치를 기준으로 잡으므로 **어느 디렉터리에서 실행해도 같은 파일**을
+읽습니다.
 
 ```bash
-cp conf/config.yaml conf/config.local.yaml
-bin/s3-ops --config conf/config.local.yaml ls s3://dw-stage/
+bin/s3-ops --config conf/config.local.yaml ls orders/   # 다른 파일을 쓸 때
+bin/s3-ops --no-config --bucket dw-stage ls orders/     # 설정을 무시할 때
 ```
 
-`query-to-csv`는 설정 파일을 읽지 않고 인자로만 동작합니다. **이 파일 하나만 다른
-곳으로 복사해서 써도 되도록** 표준 라이브러리와 impyla 외에는 아무것도 쓰지 않습니다.
+### 우선순위
+
+**명령행 인자 > 설정 파일 > 각 스크립트의 기본값** 입니다. 설정에 값이 있어도
+명령행으로 준 값이 항상 이깁니다.
+
+```bash
+bin/query-to-csv --host other-impala.example.com -q "SELECT 1" -o out.csv
+# host 만 바뀌고 user, ca_cert, session_settings 등은 설정 값을 그대로 씁니다
+```
+
+설정 파일에도 명령행에도 없는 값은 기본값으로 떨어집니다. 접속에 반드시 필요한
+값(Impala의 `host`/`user`, S3의 버킷)이 끝까지 비어 있을 때만 오류가 납니다.
 
 ### 설정 파일 세 개의 역할
 
 | 파일 | 용도 |
 | --- | --- |
-| `conf/config.yaml` | 바로 돌려볼 수 있는 최소 예제. 저장소에 커밋됩니다. |
+| `conf/config.yaml` | **기본으로 읽는 파일.** 저장소에 커밋됩니다. |
 | `conf/config.example.yaml` | 쓸 수 있는 모든 옵션을 주석과 함께 나열한 참조 문서. |
-| `conf/config.local.yaml` | 실제 운영 값. `.gitignore`에 걸려 있어 커밋되지 않습니다. |
+| `conf/config.local.yaml` | `--config`로 지정해서 쓰는 로컬 값. `.gitignore`에 걸려 있어 커밋되지 않습니다. |
 
-**운영 값은 반드시 `conf/config.local.yaml`에 두세요.** `conf/config.yaml`은 커밋되는 파일이라
-여기에 실제 호스트나 비밀번호를 적으면 저장소에 그대로 올라갑니다.
+`conf/config.yaml`은 커밋되는 파일입니다. **비밀번호나 액세스 키를 여기에 직접 적으면
+저장소에 그대로 올라갑니다.** `${IMPALA_PASSWORD}`, `${AWS_SECRET_ACCESS_KEY}` 처럼
+환경변수를 참조하세요. `${AWS_DEFAULT_REGION:-ap-northeast-2}` 형태로 기본값도 줄 수
+있습니다.
 
-비밀번호 같은 민감한 값은 어느 파일에서든 YAML에 직접 쓰지 말고 `${AWS_SECRET_ACCESS_KEY}`
-또는 `${AWS_DEFAULT_REGION:-ap-northeast-2}` 형태로 환경변수를 참조하세요. 정의되지 않은
-환경변수를 기본값 없이 참조하면 실행 시점에 바로 오류가 나므로, 값이 비어 있는 채로
-접속을 시도하는 일은 없습니다.
+호스트명처럼 커밋하기 곤란한 값이 있다면 `conf/config.local.yaml`에 두고
+`--config conf/config.local.yaml`로 지정하세요. 이 파일은 자동으로 읽히지 않습니다.
+
+참조한 환경변수가 정의되어 있지 않으면 **그 항목만 건너뛰고 경고를 남깁니다.**
+설정 파일을 항상 읽기 때문에, 지금 쓰는 명령과 무관한 항목의 환경변수 하나가 비어
+있다고 실행 자체가 막히면 곤란하기 때문입니다.
+
+```
+경고: 환경변수 IMPALA_PASSWORD 가 정의되지 않아 설정값을 건너뜁니다.
+```
 
 ## 문서
 
@@ -103,6 +129,7 @@ python -m pytest tests/ -v
 
 ```
 src/
+  appconfig.py          # conf/config.yaml 로딩, 환경변수 치환, 우선순위 규칙
   query_to_csv.py       # Impala 쿼리 → CSV 저장 (TLS + LDAP, 구간별 시간 측정)
   s3_ops.py             # S3 업로드·삭제·디렉터리 생성/삭제·목록
 
@@ -111,9 +138,9 @@ bin/
   s3-ops                # src/s3_ops.py 실행 래퍼
 
 conf/
-  config.yaml           # 바로 돌려볼 수 있는 최소 예제
+  config.yaml           # 기본으로 읽는 설정 파일
   config.example.yaml   # 모든 옵션을 주석과 함께 나열한 참조 문서
-  config.local.yaml     # 실제 운영 값 (.gitignore 대상)
+  config.local.yaml     # --config 로 지정해 쓰는 로컬 값 (.gitignore 대상)
 ```
 
 ## S3 파일 다루기
@@ -152,7 +179,8 @@ bin/s3-ops rmdir  s3://dw-stage/impala/out/ --yes
 | `--session-token` | 임시 자격증명(STS)의 세션 토큰 |
 | `--region` | AWS 리전 |
 | `--endpoint` | S3 호환 스토리지 엔드포인트 (MinIO 등) |
-| `-c`, `--config` | 프로젝트 설정 파일의 `s3` 섹션 재사용 |
+| `-c`, `--config` | 다른 설정 파일 지정 (기본 `conf/config.yaml`) |
+| `--no-config` | 설정 파일을 읽지 않음 |
 
 ```bash
 # 버킷을 미리 주면 키만 써도 됩니다
@@ -163,29 +191,37 @@ bin/s3-ops --endpoint http://minio:9000 --bucket dw-stage \
     --access-key minioadmin --secret-key minioadmin ls /
 ```
 
-우선순위는 **명령행 > 설정 파일 > 환경변수/IAM 역할** 입니다. 아무것도 주지 않으면
-boto3 기본 자격증명 체인(`AWS_ACCESS_KEY_ID` 등, IAM 역할)이 그대로 동작합니다.
+우선순위는 **명령행 > 설정 파일 > 환경변수/IAM 역할** 입니다. 설정에도 명령행에도
+자격증명이 없으면 boto3 기본 자격증명 체인(`AWS_ACCESS_KEY_ID` 등, IAM 역할)이 그대로
+동작합니다.
 
 **시크릿 키를 명령행에 적으면 `ps`로 다른 사용자에게 보입니다.** 공용 서버에서는
-`AWS_SECRET_ACCESS_KEY` 환경변수나 `--config`를 쓰세요.
+`AWS_SECRET_ACCESS_KEY` 환경변수나 설정 파일의 `${AWS_SECRET_ACCESS_KEY}` 참조를
+쓰세요.
 
 ## Impala 쿼리를 CSV로 내려받기
 
 `src/query_to_csv.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
 시간을 썼는지 보여줍니다.
 
-**이 스크립트는 단독으로 동작합니다.** 표준 라이브러리와 impyla 외에 아무것도
-필요하지 않으므로, 이 파일 하나만 복사해서 다른 곳에서 써도 됩니다.
+접속 정보는 `conf/config.yaml`의 `impala` 섹션에서 옵니다. `--host`, `-u/--user`,
+`--ca-cert`, `--auth-mechanism` 등으로 개별 값만 덮어쓸 수 있고, `--no-config`를 주면
+설정을 아예 무시하고 명령행 인자만 씁니다.
 
 ```bash
-pip install impyla pure-sasl thrift-sasl
+pip install impyla pure-sasl thrift-sasl PyYAML
+export IMPALA_USER='etl_user'
 export IMPALA_PASSWORD='...'
 
 bin/query-to-csv \
-    --host impala.example.com --user etl_user \
-    --ca-cert /etc/ssl/certs/impala-ca.pem \
     --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
     --output orders.csv
+
+# 설정 없이 전부 명령행으로
+bin/query-to-csv --no-config \
+    --host impala.example.com --user etl_user \
+    --ca-cert /etc/ssl/certs/impala-ca.pem \
+    -q "SELECT 1" -o out.csv
 ```
 
 ```
@@ -207,7 +243,8 @@ orders.csv  182.4MB  1,240,331행
 (CSV 쓰기) 한눈에 구분됩니다.
 
 - 비밀번호는 `--password` 같은 인자로 받지 않습니다. `ps`로 다른 사용자에게 노출되기
-  때문에 환경변수(`IMPALA_PASSWORD`)나 대화형 입력으로만 받습니다.
+  때문에 설정 파일(`impala.password`, 보통 `${IMPALA_PASSWORD}` 참조), 환경변수,
+  대화형 입력 순으로만 받습니다.
 - `--ca-cert`를 주지 않으면 통신은 암호화되지만 서버 인증서를 검증하지 않습니다.
   운영 환경에서는 CA 인증서 경로를 지정하세요.
 - 엑셀에서 한글이 깨지면 `--encoding utf-8-sig`를 쓰세요.

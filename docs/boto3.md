@@ -334,8 +334,9 @@ def exists(bucket: str, key: str) -> bool:
 ## 8. 설정 파일을 그대로 재사용하기
 
 `conf/config.yaml` 에 이미 버킷과 자격증명이 있으니, 목록 확인 스크립트에서도 같은 설정을
-쓰면 됩니다. `src/s3_ops.py` 의 `read_s3_settings` 가 s3 섹션에서 접속에 필요한 값만
-읽어 `${ENV_VAR}` 참조까지 치환해 돌려줍니다.
+쓰면 됩니다. `bin/s3-ops` 가 기본으로 읽는 파일이고, `src/s3_ops.py` 의
+`read_s3_settings` 가 s3 섹션에서 접속에 필요한 값만 읽어 `${ENV_VAR}` 참조까지
+치환해 돌려줍니다.
 
 ```python
 import sys
@@ -362,7 +363,7 @@ for page in paginator.paginate(Bucket=settings["bucket"], Prefix="orders/"):
 같은 일을 명령행에서 하려면:
 
 ```bash
-bin/s3-ops --config conf/config.yaml ls s3://dw-stage/orders/
+bin/s3-ops ls s3://dw-stage/orders/      # 설정은 자동으로 읽힙니다
 ```
 
 ## S3 호환 스토리지(MinIO 등)

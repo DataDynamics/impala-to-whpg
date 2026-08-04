@@ -5,10 +5,10 @@
 설정과 외부 테이블 작성법을 다룹니다.
 
 ```bash
-# 1) Impala에서 뽑고
-bin/query-to-csv --host impala.example.com --user etl_user \
+# 1) Impala에서 뽑고 (접속 정보는 conf/config.yaml 에서 온다)
+bin/query-to-csv \
     --query "SELECT * FROM sales.orders WHERE dt = '2026-08-01'" \
-    --output orders.csv --delimiter $'\t' --null-string '\N' --gzip
+    --output orders.csv.gz --delimiter $'\t' --null-string '\N' --no-header --gzip
 
 # 2) S3에 올리고
 bin/s3-ops upload orders.csv.gz s3://dw-stage/orders/2026-08-01/
@@ -70,11 +70,14 @@ gpcheckcloud -c "s3://s3.ap-northeast-2.amazonaws.com/dw-stage/ config=/home/gpa
 
 ## 2. 파일을 S3에 올리기
 
-`bin/s3-ops` 로 올립니다. 접속 정보를 매번 주기 싫으면 `--config` 로 `conf/` 설정을
-재사용하세요.
+`bin/s3-ops` 로 올립니다. 버킷과 자격증명은 `conf/config.yaml` 에서 자동으로
+읽으므로 매번 줄 필요가 없습니다.
 
 ```bash
 bin/s3-ops upload ./out/ s3://dw-stage/orders/2026-08-01/ --recursive
+bin/s3-ops ls s3://dw-stage/orders/2026-08-01/
+
+# 다른 설정 파일을 쓸 때
 bin/s3-ops --config conf/config.local.yaml ls s3://dw-stage/orders/2026-08-01/
 ```
 
@@ -124,9 +127,10 @@ DROP EXTERNAL TABLE ext_orders_20260801;
 
 ```bash
 for dt in 2026-08-01 2026-08-02 2026-08-03; do
-    bin/query-to-csv --host impala.example.com --user etl_user \
+    bin/query-to-csv \
         --query "SELECT * FROM sales.orders WHERE dt = '$dt'" \
-        --output "out/orders-$dt.csv.gz" --gzip --delimiter $'\t' --null-string '\N'
+        --output "out/orders-$dt.csv.gz" --gzip \
+        --delimiter $'\t' --null-string '\N' --no-header
 done
 bin/s3-ops upload ./out/ s3://dw-stage/orders/202608/ --recursive
 ```
