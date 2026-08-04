@@ -8,4 +8,4 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
 
-exec "${PYTHON:-python3}" "$root/src/query_to_csv.py" "$@"
+exec "${PYTHON:-python3}" "$root/src/impala_query_to_csv.py" "$@"

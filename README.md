@@ -4,7 +4,7 @@ Impala 조회, Greenplum 실행, S3 조작을 위한 명령행 도구 모음입�
 
 | 도구 | 하는 일 |
 | --- | --- |
-| `bin/query-to-csv` | Impala에서 쿼리를 실행해 CSV로 저장하고 구간별 소요 시간을 보여줍니다. |
+| `bin/impala-query-to-csv` | Impala에서 쿼리를 실행해 CSV로 저장하고 구간별 소요 시간을 보여줍니다. |
 | `bin/gp-query` | Greenplum에 SQL을 실행하고 결과를 표나 CSV로 보여줍니다. |
 | `bin/s3-ops` | S3 업로드·삭제·디렉터리 생성/삭제·목록. |
 
@@ -15,7 +15,7 @@ pip로 설치하지 않고 저장소에서 바로 실행합니다. `bin/` 아래
 **인자 없이 실행하면 사용법과 예시를 보여줍니다.** `--help`와 같습니다.
 
 ```bash
-bin/query-to-csv
+bin/impala-query-to-csv
 bin/gp-query
 bin/s3-ops
 ```
@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 | 도구 | 필요한 패키지 |
 | --- | --- |
-| `query-to-csv` | `impyla`, `PyYAML`, `Jinja2` (+ LDAP/Kerberos 인증 시 `pure-sasl`, `thrift-sasl`) |
+| `impala-query-to-csv` | `impyla`, `PyYAML`, `Jinja2` (+ LDAP/Kerberos 인증 시 `pure-sasl`, `thrift-sasl`) |
 | `gp-query` | `psycopg2-binary`, `PyYAML`, `Jinja2` |
 | `s3-ops` | `boto3`, `PyYAML` |
 
@@ -62,7 +62,7 @@ export AWS_ACCESS_KEY_ID='...'
 export AWS_SECRET_ACCESS_KEY='...'
 
 # 접속 정보는 설정에서, 쿼리는 sql/ 에서 오므로 변수와 출력 경로만 주면 됩니다
-bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 --output orders.csv
+bin/impala-query-to-csv -f daily_orders.sql --var dt=2026-08-01 --output orders.csv
 
 # Greenplum에 실행. 결과가 있으면 표로 보여줍니다.
 bin/gp-query -f order_summary.sql --var dt=2026-08-01
@@ -85,7 +85,7 @@ bin/s3-ops --no-config --bucket dw-stage ls orders/     # 설정을 무시할 �
 명령행으로 준 값이 항상 이깁니다.
 
 ```bash
-bin/query-to-csv --host other-impala.example.com -q "SELECT 1" -o out.csv
+bin/impala-query-to-csv --host other-impala.example.com -q "SELECT 1" -o out.csv
 # host 만 바뀌고 user, ca_cert, session_settings 등은 설정 값을 그대로 씁니다
 ```
 
@@ -142,34 +142,34 @@ Impala/Greenplum/S3 없이도 실행됩니다.
 
 ```
 src/
-  appconfig.py          # conf/config.yaml 로딩, 환경변수 치환, 우선순위 규칙
-  sqlfile.py            # sql/ 의 .sql 찾기, Jinja 템플릿 채우기
-  query_to_csv.py       # Impala 쿼리 → CSV 저장 (TLS + LDAP, 구간별 시간 측정)
-  gp_query.py           # Greenplum SQL 실행 → 표 또는 CSV
-  s3_ops.py             # S3 업로드·삭제·디렉터리 생성/삭제·목록
+  appconfig.py            # conf/config.yaml 로딩, 환경변수 치환, 우선순위 규칙
+  sqlfile.py              # sql/ 의 .sql 찾기, Jinja 템플릿 채우기
+  impala_query_to_csv.py  # Impala 쿼리 → CSV 저장 (TLS + LDAP, 구간별 시간 측정)
+  gp_query.py             # Greenplum SQL 실행 → 표 또는 CSV
+  s3_ops.py               # S3 업로드·삭제·디렉터리 생성/삭제·목록
 
 bin/
-  query-to-csv          # src/query_to_csv.py 실행 래퍼
-  gp-query              # src/gp_query.py 실행 래퍼
-  s3-ops                # src/s3_ops.py 실행 래퍼
+  impala-query-to-csv     # src/impala_query_to_csv.py 실행 래퍼
+  gp-query                # src/gp_query.py 실행 래퍼
+  s3-ops                  # src/s3_ops.py 실행 래퍼
 
 sql/
-  daily_orders.sql      # 하루치 주문 (--var dt)
-  order_range.sql       # 기간별 집계 (--var from_dt, to_dt)
-  order_summary.sql     # Greenplum 적재분 집계 (--var dt)
-  README.md             # 템플릿 작성법
+  daily_orders.sql        # 하루치 주문 (--var dt)
+  order_range.sql         # 기간별 집계 (--var from_dt, to_dt)
+  order_summary.sql       # Greenplum 적재분 집계 (--var dt)
+  README.md               # 템플릿 작성법
 
 conf/
-  config.yaml           # 기본으로 읽는 설정 파일 (sql.dir 로 위 경로를 바꿀 수 있음)
-  config.example.yaml   # 모든 옵션을 주석과 함께 나열한 참조 문서
-  config.local.yaml     # --config 로 지정해 쓰는 로컬 값 (.gitignore 대상)
-  impala-ca.pem         # Impala TLS 검증용 CA 인증서
+  config.yaml             # 기본으로 읽는 설정 파일 (sql.dir 로 위 경로를 바꿀 수 있음)
+  config.example.yaml     # 모든 옵션을 주석과 함께 나열한 참조 문서
+  config.local.yaml       # --config 로 지정해 쓰는 로컬 값 (.gitignore 대상)
+  impala-ca.pem           # Impala TLS 검증용 CA 인증서
 ```
 
 ## Greenplum에 SQL 실행하기
 
 `src/gp_query.py`가 `conf/config.yaml`의 `greenplum` 섹션으로 접속해 SQL을 실행합니다.
-`sql/`의 템플릿과 `--var`는 `query-to-csv`와 똑같이 동작합니다.
+`sql/`의 템플릿과 `--var`는 `impala-query-to-csv`와 똑같이 동작합니다.
 
 ```bash
 export GP_PASSWORD='...'
@@ -283,7 +283,7 @@ bin/s3-ops --endpoint http://minio:9000 --bucket dw-stage \
 
 ## Impala 쿼리를 CSV로 내려받기
 
-`src/query_to_csv.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
+`src/impala_query_to_csv.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
 시간을 썼는지 보여줍니다.
 
 접속 정보는 `conf/config.yaml`의 `impala` 섹션에서, 쿼리는 `sql/`의 `.sql` 템플릿에서
@@ -297,15 +297,15 @@ export IMPALA_PASSWORD='...'
 
 cp /경로/impala-ca.pem conf/impala-ca.pem   # 설정의 impala.ca_cert 가 가리키는 위치
 
-bin/query-to-csv \
+bin/impala-query-to-csv \
     --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
     --output orders.csv
 
 # sql/ 의 템플릿에 변수를 채워 실행
-bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
+bin/impala-query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
 
 # 설정 없이 전부 명령행으로
-bin/query-to-csv --no-config \
+bin/impala-query-to-csv --no-config \
     --host impala.example.com --user etl_user \
     --ca-cert /etc/ssl/certs/impala-ca.pem \
     -q "SELECT 1" -o out.csv
@@ -365,10 +365,10 @@ order_id`name`amount`order_dt
 
 ```bash
 # 따옴표로 감싸기
-bin/query-to-csv ... --quote
+bin/impala-query-to-csv ... --quote
 
 # 쉼표 구분으로 되돌리기
-bin/query-to-csv ... --delimiter ,
+bin/impala-query-to-csv ... --delimiter ,
 ```
 
 값 안에 구분자가 들어 있으면 이스케이프됩니다(`백틱` → `` 백틱\`포함 ``). `--escapechar ''`
@@ -384,7 +384,7 @@ bin/query-to-csv ... --delimiter ,
 여러 줄짜리 쿼리는 `sql/` 아래에 `.sql` 파일로 두고 이름만 넘깁니다.
 
 ```bash
-bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
+bin/impala-query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
 ```
 
 이름에 경로 구분자가 없으면 `sql/`에서 찾고, 없는 이름을 주면 거기 있는 파일을
@@ -399,7 +399,7 @@ sql:
 ```
 
 ```bash
-bin/query-to-csv --sql-dir /srv/etl/queries -f daily_orders.sql -V dt=2026-08-01 -o out.csv
+bin/impala-query-to-csv --sql-dir /srv/etl/queries -f daily_orders.sql -V dt=2026-08-01 -o out.csv
 ```
 
 설정의 `sql.dir`은 `ca_cert`와 같이 **설정 파일이 있는 디렉터리 기준**으로 풀리고,
@@ -419,7 +419,7 @@ SELECT order_id, customer_id, amount
 ```
 
 ```bash
-bin/query-to-csv -f daily_orders.sql \
+bin/impala-query-to-csv -f daily_orders.sql \
     --var dt=2026-08-01 --var status=PAID -o orders.csv
 ```
 
@@ -487,15 +487,15 @@ WHERE dt = '2026-08-01'
 
 ```bash
 # HTTP 엔드포인트를 쓰는 환경 (CDP 등에서 흔합니다)
-bin/query-to-csv --host impala.example.com --user etl_user \
+bin/impala-query-to-csv --host impala.example.com --user etl_user \
     --port 28000 --http-transport --ca-cert /etc/ssl/certs/impala-ca.pem \
     -q "SELECT 1" -o test.csv
 
 # 서버가 평문이라면
-bin/query-to-csv ... --no-ssl
+bin/impala-query-to-csv ... --no-ssl
 
 # 인증이 없는 서버라면
-bin/query-to-csv ... --auth-mechanism NOSASL
+bin/impala-query-to-csv ... --auth-mechanism NOSASL
 ```
 
 `impala-shell`로 같은 조건에서 붙어보면 서버 쪽 설정인지 클라이언트 쪽인지 빨리

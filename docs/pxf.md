@@ -141,7 +141,7 @@ GRANT INSERT ON PROTOCOL pxf TO etl;    -- 쓰기 가능 외부 테이블
 
 ## 2. pxf-profiles.xml — 대부분 건드릴 필요가 없습니다
 
-`s3:text`, `s3:parquet` 같은 기본 프로파일은 이미 정의되어 있습니다. `query-to-csv`
+`s3:text`, `s3:parquet` 같은 기본 프로파일은 이미 정의되어 있습니다. `impala-query-to-csv`
 로 뽑은 탭 구분 gzip 파일도 기본 `s3:text` 로 그대로 읽히므로, **먼저 커스텀 프로파일
 없이 되는지 확인하세요.** 포맷 옵션은 외부 테이블 쪽에 적으면 됩니다.
 
@@ -297,7 +297,7 @@ pxf://dw-stage/orders/2026-08-01/?PROFILE=s3:text&SERVER=s3srv
 합니다.
 
 ```bash
-bin/query-to-csv \
+bin/impala-query-to-csv \
     --query "SELECT order_id, name, amount FROM sales.orders WHERE dt = '2026-08-01'" \
     --output orders.csv.gz --gzip --delimiter $'\t' --null-string '\N' --no-header
 

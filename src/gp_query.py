@@ -206,7 +206,7 @@ def write_csv(
     null_string: str,
     write_header: bool,
 ) -> int:
-    """결과를 CSV로 쓴다. query-to-csv 와 같은 기본값(백틱 구분, 따옴표 없음)이다."""
+    """결과를 CSV로 쓴다. impala-query-to-csv 와 같은 기본값(백틱 구분, 따옴표 없음)이다."""
     writer = csv.writer(
         handle,
         delimiter=delimiter,
