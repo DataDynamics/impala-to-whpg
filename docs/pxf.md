@@ -184,17 +184,10 @@ sed -n '/<name>s3:text<\/name>/,/<\/profile>/p' \
              plugins/protocol/handler 구성은 버전마다 다르므로 임의로 지우거나
              더하지 말고 통째로 옮길 것. -->
         <plugins>
-            <fragmenter>...설치본에서 복사...</fragmenter>
-            <accessor>...설치본에서 복사...</accessor>
-            <resolver>...설치본에서 복사...</resolver>
+            <fragmenter>org.greenplum.pxf.plugins.hdfs.HdfsFileFragmenter</fragmenter>
+            <accessor>org.greenplum.pxf.plugins.hdfs.ParquetFileAccessor</accessor>
+            <resolver>org.greenplum.pxf.plugins.hdfs.ParquetResolver</resolver>
         </plugins>
-
-        <optionMappings>
-            <mapping>
-                <option>COMPRESSION_CODEC</option>
-                <property>compression.codec</property>
-            </mapping>
-        </optionMappings>
     </profile>
 </profiles>
 ```
