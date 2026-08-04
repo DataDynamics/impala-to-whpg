@@ -1,4 +1,4 @@
-"""examples/s3_ops.py 검증 (가짜 S3 클라이언트로 실행)."""
+"""src/s3_ops.py 검증 (가짜 S3 클라이언트로 실행)."""
 
 import argparse
 import sys
@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import s3_ops as s  # noqa: E402
 

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# S3 파일·디렉터리 조작(업로드, 삭제, 디렉터리 생성/삭제, 목록).
+#
+# 저장소를 pip로 설치하지 않고 쓰기 때문에, 이 스크립트가 소스 위치를 찾아
+# 파이썬에 넘겨준다. 다른 인터프리터를 쓰려면 PYTHON 환경변수로 지정한다.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(dirname "$here")"
+
+exec "${PYTHON:-python3}" "$root/src/s3_ops.py" "$@"

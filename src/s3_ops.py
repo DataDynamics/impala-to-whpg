@@ -1,11 +1,11 @@
-"""S3 파일·디렉터리 조작 예제 (업로드, 삭제, 디렉터리 생성/삭제, 목록).
+"""S3 파일·디렉터리 조작 (업로드, 삭제, 디렉터리 생성/삭제, 목록).
 
-    python examples/s3_ops.py ls     s3://dw-stage/impala/
-    python examples/s3_ops.py upload orders.csv s3://dw-stage/impala/orders.csv
-    python examples/s3_ops.py upload ./out/ s3://dw-stage/impala/out/ --recursive
-    python examples/s3_ops.py mkdir  s3://dw-stage/impala/2026-08-03/
-    python examples/s3_ops.py rm     s3://dw-stage/impala/orders.csv --yes
-    python examples/s3_ops.py rmdir  s3://dw-stage/impala/2026-08-03/ --yes
+    bin/s3-ops ls     s3://dw-stage/impala/
+    bin/s3-ops upload orders.csv s3://dw-stage/impala/orders.csv
+    bin/s3-ops upload ./out/ s3://dw-stage/impala/out/ --recursive
+    bin/s3-ops mkdir  s3://dw-stage/impala/2026-08-03/
+    bin/s3-ops rm     s3://dw-stage/impala/orders.csv --yes
+    bin/s3-ops rmdir  s3://dw-stage/impala/2026-08-03/ --yes
 
 S3에는 디렉터리가 없다. 키가 ``a/b/c.csv`` 인 오브젝트가 있을 뿐이고, 콘솔이
 슬래시를 보고 폴더처럼 보여줄 뿐이다. 그래서 이 스크립트에서는
@@ -16,7 +16,7 @@ S3에는 디렉터리가 없다. 키가 ``a/b/c.csv`` 인 오브젝트가 있을
 
 삭제는 되돌릴 수 없으므로 ``--yes`` 없이는 지울 목록을 보여주고 물어본다.
 
-자격증명은 환경변수나 IAM 역할을 따른다. ``--config config.yaml`` 을 주면
+자격증명은 환경변수나 IAM 역할을 따른다. ``--config conf/config.yaml`` 을 주면
 프로젝트 설정의 s3 섹션(버킷, 자격증명, 엔드포인트)을 그대로 재사용한다.
 """
 
@@ -309,7 +309,8 @@ COMMANDS = {
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="S3 파일·디렉터리 조작 예제",
+        prog="bin/s3-ops",
+        description="S3 파일·디렉터리 조작 (업로드, 삭제, 디렉터리 생성/삭제, 목록)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "예시:\n"

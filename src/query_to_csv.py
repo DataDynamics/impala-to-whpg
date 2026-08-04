@@ -10,7 +10,7 @@ TLS(SSL) 위에서 LDAP 인증(auth_mechanism=PLAIN)으로 접속하는 구성�
     #     pip install --use-pep517 pure-sasl thrift-sasl
 
     export IMPALA_PASSWORD='...'
-    python query_to_csv.py \
+    bin/query-to-csv \
         --host impala.example.com \
         --user etl_user \
         --ca-cert /etc/ssl/certs/impala-ca.pem \
@@ -18,7 +18,7 @@ TLS(SSL) 위에서 LDAP 인증(auth_mechanism=PLAIN)으로 접속하는 구성�
         --output orders.csv
 
     # 쿼리를 파일에서 읽고 gzip으로 압축해 저장
-    python query_to_csv.py --host impala.example.com --user etl_user \
+    bin/query-to-csv --host impala.example.com --user etl_user \
         --query-file daily_orders.sql --output orders.csv.gz --gzip
 
 비밀번호는 명령행 인자로 받지 않는다. ps로 다른 사용자에게 노출되기 때문에
@@ -496,6 +496,7 @@ def human(size: float) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        prog="bin/query-to-csv",
         description="Impala 쿼리 결과를 CSV로 저장하고 구간별 소요 시간을 표시합니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

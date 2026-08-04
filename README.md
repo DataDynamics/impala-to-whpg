@@ -41,18 +41,18 @@ pip install -r requirements.txt
 
 ## 빠른 시작
 
-`config.yaml`을 복사해 접속 정보를 채운 뒤 실행합니다.
+`conf/config.yaml`을 복사해 접속 정보를 채운 뒤 실행합니다.
 
 ```bash
-cp config.yaml config.local.yaml
+cp conf/config.yaml conf/config.local.yaml
 
 export IMPALA_USER='etl_user'     # Impala LDAP 계정
 export IMPALA_PASSWORD='...'
 export GP_PASSWORD='...'
 
-python -m impala_to_greenplum --config config.local.yaml            # 전체 작업 실행
-python -m impala_to_greenplum --config config.local.yaml -j orders  # 특정 작업만 실행
-python -m impala_to_greenplum --config config.local.yaml -v         # 디버그 로그
+python -m impala_to_greenplum --config conf/config.local.yaml            # 전체 작업 실행
+python -m impala_to_greenplum --config conf/config.local.yaml -j orders  # 특정 작업만 실행
+python -m impala_to_greenplum --config conf/config.local.yaml -v         # 디버그 로그
 ```
 
 예제 설정은 Impala에 **TLS + LDAP**으로 접속합니다(`auth_mechanism: PLAIN`,
@@ -63,11 +63,11 @@ python -m impala_to_greenplum --config config.local.yaml -v         # 디버그 
 
 | 파일 | 용도 |
 | --- | --- |
-| `config.yaml` | 바로 돌려볼 수 있는 최소 예제. 저장소에 커밋됩니다. |
-| `config.example.yaml` | 쓸 수 있는 모든 옵션을 주석과 함께 나열한 참조 문서. |
-| `config.local.yaml` | 실제 운영 값. `.gitignore`에 걸려 있어 커밋되지 않습니다. |
+| `conf/config.yaml` | 바로 돌려볼 수 있는 최소 예제. 저장소에 커밋됩니다. |
+| `conf/config.example.yaml` | 쓸 수 있는 모든 옵션을 주석과 함께 나열한 참조 문서. |
+| `conf/config.local.yaml` | 실제 운영 값. `.gitignore`에 걸려 있어 커밋되지 않습니다. |
 
-**운영 값은 반드시 `config.local.yaml`에 두세요.** `config.yaml`은 커밋되는 파일이라
+**운영 값은 반드시 `conf/config.local.yaml`에 두세요.** `conf/config.yaml`은 커밋되는 파일이라
 여기에 실제 호스트나 비밀번호를 적으면 저장소에 그대로 올라갑니다.
 
 비밀번호 같은 민감한 값은 어느 파일에서든 YAML에 직접 쓰지 말고 `${GP_PASSWORD}` 또는
@@ -99,7 +99,7 @@ print(result.summary())
 # orders: 1,240,331건 읽음 / 1,240,331건 적재 / 18,204건 삭제, 42.7초 (29,047 rows/s)
 ```
 
-전체 예제는 `examples/simple_load.py`를 참고하세요.
+인자 전체는 `impala_to_greenplum/pipeline.py` 의 `load_query` 를 참고하세요.
 
 ## 적재 모드
 
@@ -224,24 +224,35 @@ impala_to_greenplum/
   pipeline.py     # 작업 실행 흐름과 트랜잭션 제어
   cli.py          # 커맨드라인 진입점
 
-examples/
-  simple_load.py        # 설정 파일 없이 코드로 적재
+src/
   query_to_csv.py       # Impala 쿼리 → CSV 저장 (TLS + LDAP, 구간별 시간 측정)
   s3_ops.py             # S3 업로드·삭제·디렉터리 생성/삭제·목록
-  list_staged_files.py  # S3 스테이징 파일 목록 확인
+
+bin/
+  query-to-csv          # src/query_to_csv.py 실행 래퍼
+  s3-ops                # src/s3_ops.py 실행 래퍼
+
+conf/
+  config.yaml           # 바로 돌려볼 수 있는 최소 예제
+  config.example.yaml   # 모든 옵션을 주석과 함께 나열한 참조 문서
+  config.local.yaml     # 실제 운영 값 (.gitignore 대상)
 ```
+
+pip로 설치하지 않고 저장소에서 바로 씁니다. `bin/` 아래 스크립트가 소스 위치를
+찾아 파이썬에 넘겨주므로 어느 디렉터리에서 호출해도 동작합니다. 다른 인터프리터를
+쓰려면 `PYTHON=/path/to/python bin/s3-ops ...` 처럼 지정하세요.
 
 ## S3 파일 다루기
 
-`examples/s3_ops.py`로 업로드, 삭제, 디렉터리 생성/삭제를 할 수 있습니다.
+`src/s3_ops.py`로 업로드, 삭제, 디렉터리 생성/삭제를 할 수 있습니다.
 
 ```bash
-python examples/s3_ops.py ls     s3://dw-stage/impala/
-python examples/s3_ops.py upload orders.csv s3://dw-stage/impala/
-python examples/s3_ops.py upload ./out/ s3://dw-stage/impala/out/ --recursive
-python examples/s3_ops.py mkdir  s3://dw-stage/impala/2026-08-03/
-python examples/s3_ops.py rm     s3://dw-stage/impala/orders.csv --yes
-python examples/s3_ops.py rmdir  s3://dw-stage/impala/out/ --yes
+bin/s3-ops ls     s3://dw-stage/impala/
+bin/s3-ops upload orders.csv s3://dw-stage/impala/
+bin/s3-ops upload ./out/ s3://dw-stage/impala/out/ --recursive
+bin/s3-ops mkdir  s3://dw-stage/impala/2026-08-03/
+bin/s3-ops rm     s3://dw-stage/impala/orders.csv --yes
+bin/s3-ops rmdir  s3://dw-stage/impala/out/ --yes
 ```
 
 **S3에는 디렉터리가 없습니다.** 키가 `a/b/c.csv`인 오브젝트가 있을 뿐이고, 콘솔이
@@ -271,10 +282,10 @@ python examples/s3_ops.py rmdir  s3://dw-stage/impala/out/ --yes
 
 ```bash
 # 버킷을 미리 주면 키만 써도 됩니다
-python examples/s3_ops.py --bucket dw-stage ls impala/
+bin/s3-ops --bucket dw-stage ls impala/
 
 # MinIO 등 S3 호환 스토리지
-python examples/s3_ops.py --endpoint http://minio:9000 --bucket dw-stage \
+bin/s3-ops --endpoint http://minio:9000 --bucket dw-stage \
     --access-key minioadmin --secret-key minioadmin ls /
 ```
 
@@ -287,7 +298,7 @@ boto3 기본 자격증명 체인(`AWS_ACCESS_KEY_ID` 등, IAM 역할)이 그대�
 ## Impala 쿼리를 CSV로 내려받기
 
 Greenplum 적재와 별개로, Impala 결과를 파일로 뽑아야 할 때가 있습니다.
-`examples/query_to_csv.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
+`src/query_to_csv.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
 시간을 썼는지 보여줍니다.
 
 **이 스크립트는 단독으로 동작합니다.** 표준 라이브러리와 impyla 외에 아무것도
@@ -297,7 +308,7 @@ Greenplum 적재와 별개로, Impala 결과를 파일로 뽑아야 할 때가 �
 pip install impyla pure-sasl thrift-sasl
 export IMPALA_PASSWORD='...'
 
-python examples/query_to_csv.py \
+bin/query-to-csv \
     --host impala.example.com --user etl_user \
     --ca-cert /etc/ssl/certs/impala-ca.pem \
     --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
@@ -351,10 +362,10 @@ order_id`name`amount`order_dt
 
 ```bash
 # 따옴표로 감싸기
-python examples/query_to_csv.py ... --quote
+bin/query-to-csv ... --quote
 
 # 쉼표 구분으로 되돌리기
-python examples/query_to_csv.py ... --delimiter ,
+bin/query-to-csv ... --delimiter ,
 ```
 
 값 안에 구분자가 들어 있으면 이스케이프됩니다(`백틱` → `` 백틱\`포함 ``). `--escapechar ''`
@@ -370,7 +381,7 @@ python examples/query_to_csv.py ... --delimiter ,
 `--query-file`로 여러 줄짜리 쿼리를 담은 `.sql` 파일을 넘길 수 있습니다.
 
 ```bash
-python examples/query_to_csv.py --host ... --user ... \
+bin/query-to-csv --host ... --user ... \
     --query-file daily_orders.sql --output orders.csv
 ```
 
@@ -415,15 +426,15 @@ WHERE dt = '2026-08-01'
 
 ```bash
 # HTTP 엔드포인트를 쓰는 환경 (CDP 등에서 흔합니다)
-python examples/query_to_csv.py --host impala.example.com --user etl_user \
+bin/query-to-csv --host impala.example.com --user etl_user \
     --port 28000 --http-transport --ca-cert /etc/ssl/certs/impala-ca.pem \
     -q "SELECT 1" -o test.csv
 
 # 서버가 평문이라면
-python examples/query_to_csv.py ... --no-ssl
+bin/query-to-csv ... --no-ssl
 
 # 인증이 없는 서버라면
-python examples/query_to_csv.py ... --auth-mechanism NOSASL
+bin/query-to-csv ... --auth-mechanism NOSASL
 ```
 
 `impala-shell`로 같은 조건에서 붙어보면 서버 쪽 설정인지 클라이언트 쪽인지 빨리

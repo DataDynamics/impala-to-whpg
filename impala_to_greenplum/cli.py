@@ -1,8 +1,8 @@
 """커맨드라인 진입점.
 
 사용 예:
-    python -m impala_to_greenplum --config config.yaml
-    python -m impala_to_greenplum --config config.yaml --job orders --verbose
+    python -m impala_to_greenplum --config conf/config.yaml
+    python -m impala_to_greenplum --config conf/config.yaml --job orders --verbose
 """
 
 from __future__ import annotations

@@ -129,7 +129,7 @@ can_access("dw-stage")
 ```python
 from impala_to_greenplum import load_config
 
-config = load_config("config.yaml")
+config = load_config("conf/config.yaml")
 can_access(config.s3.bucket)
 ```
 
@@ -326,14 +326,14 @@ def exists(bucket: str, key: str) -> bool:
 
 ## 8. 이 프로젝트 설정을 그대로 재사용하기
 
-`config.yaml` 에 이미 버킷과 자격증명이 있으니, 목록 확인 스크립트에서도 같은 설정을
+`conf/config.yaml` 에 이미 버킷과 자격증명이 있으니, 목록 확인 스크립트에서도 같은 설정을
 쓰면 됩니다.
 
 ```python
 from impala_to_greenplum import load_config
 from impala_to_greenplum.s3_stage import S3Stager
 
-config = load_config("config.yaml")
+config = load_config("conf/config.yaml")
 stager = S3Stager(config.s3)
 
 paginator = stager.client.get_paginator("list_objects_v2")
@@ -347,12 +347,11 @@ for page in paginator.paginate(Bucket=config.s3.bucket, Prefix=prefix):
 `S3Stager.client` 는 설정의 자격증명·리전·`client_endpoint_url`(MinIO 등)을 반영해
 만들어진 boto3 클라이언트라, 별도 설정 없이 바로 쓸 수 있습니다.
 
-바로 실행할 수 있는 스크립트는 `examples/list_staged_files.py` 에 있습니다.
+바로 실행할 수 있는 스크립트는 `src/s3_ops.py` 에 있습니다. `--config` 를 주면
+설정의 s3 섹션(버킷, 자격증명, 엔드포인트)을 그대로 재사용합니다.
 
 ```bash
-python examples/list_staged_files.py --config config.yaml
-python examples/list_staged_files.py --config config.yaml --group   # 실행 단위로 묶어 보기
-python examples/list_staged_files.py --config config.yaml --stale 24
+bin/s3-ops --config conf/config.yaml ls s3://dw-stage/impala-to-greenplum/
 ```
 
 ## S3 호환 스토리지(MinIO 등)

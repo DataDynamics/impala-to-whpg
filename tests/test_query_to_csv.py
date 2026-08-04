@@ -1,4 +1,4 @@
-"""examples/query_to_csv.py 검증 (실제 Impala 없이 가짜 커서로 실행)."""
+"""src/query_to_csv.py 검증 (실제 Impala 없이 가짜 커서로 실행)."""
 
 import argparse
 import gzip
@@ -12,7 +12,7 @@ from typing import List
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import query_to_csv as q  # noqa: E402
 

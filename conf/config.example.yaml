@@ -8,7 +8,7 @@ impala:
   # 인증 방식: NOSASL(인증 없음) | PLAIN(LDAP) | GSSAPI(Kerberos)
   auth_mechanism: NOSASL
 
-  # TLS + LDAP 조합을 쓴다면 아래 네 줄을 함께 켠다 (config.yaml 참고)
+  # TLS + LDAP 조합을 쓴다면 아래 네 줄을 함께 켠다 (conf/config.yaml 참고)
   # auth_mechanism: PLAIN
   # user: ${IMPALA_USER}
   # password: ${IMPALA_PASSWORD}
