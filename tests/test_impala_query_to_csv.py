@@ -53,7 +53,6 @@ def run_export(rows=ROWS, columns=COLUMNS, **overrides) -> str:
         delimiter="`",
         null_string="",
         write_header=True,
-        progress_every=0,
         quote=False,
         escapechar="\\",
     )
@@ -173,7 +172,6 @@ def test_column_name_is_stripped_of_table_prefix():
         delimiter="`",
         null_string="",
         write_header=True,
-        progress_every=0,
     )
     assert buffer.getvalue().splitlines()[0] == "order_id`name"
 
@@ -191,7 +189,6 @@ def test_export_defaults_to_unquoted():
         delimiter="`",
         null_string="",
         write_header=False,
-        progress_every=0,
     )
     assert buffer.getvalue() == '따옴표" 있음\r\n'
 
@@ -207,7 +204,6 @@ def test_arraysize_is_set_before_execute():
         delimiter="`",
         null_string="",
         write_header=True,
-        progress_every=0,
     )
     assert cursor.arraysize == 1234
     assert cursor.executed == ["SELECT 1"]
@@ -600,6 +596,7 @@ def test_script_has_no_unexpected_dependency():
         "jinja2",     # 선택: SQL에 템플릿 문법이 있을 때만 임포트한다
         "appconfig",  # 같은 디렉터리의 설정 로더. PyYAML은 그쪽에서 지연 임포트한다.
         "sqlfile",    # 같은 디렉터리의 쿼리 로더. Jinja2는 그쪽에서 지연 임포트한다.
+        "progress",   # 같은 디렉터리의 소요 시간·진행 상황 보고
     }
     assert modules <= stdlib | third_party, (
         f"허용되지 않은 의존성: {modules - stdlib - third_party}"
@@ -771,7 +768,6 @@ def test_export_records_all_phases():
         delimiter=",",
         null_string="",
         write_header=True,
-        progress_every=0,
     )
     report = timer.report()
     for phase in ("쿼리 실행 요청", "첫 배치 대기", "데이터 수신", "CSV 쓰기"):

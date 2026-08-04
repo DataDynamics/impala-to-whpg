@@ -49,7 +49,9 @@ import unicodedata
 from typing import Any, Dict, Iterator, List, Optional, Sequence, TextIO
 
 import appconfig
+import progress
 import sqlfile
+from progress import PhaseTimer, display_width, pad
 from sqlfile import (  # 다른 스크립트와 공유하는 쿼리 읽기
     load_sql_settings,
     parse_variables,
@@ -188,75 +190,6 @@ def check_auth_dependencies(auth_mechanism: str) -> None:
         "  데비안/우분투에서 'Failed building wheel for pure-sasl' 이 나면:\n"
         "    pip install --use-pep517 pure-sasl thrift-sasl"
     )
-
-
-def display_width(text: str) -> int:
-    """터미널에서 차지하는 칸 수. 한글·한자는 두 칸을 쓴다."""
-    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
-
-
-def pad(text: str, width: int) -> str:
-    """표시 폭 기준으로 오른쪽을 채운다(한글이 섞여도 열이 맞는다)."""
-    return text + " " * max(0, width - display_width(text))
-
-
-class PhaseTimer:
-    """구간별 누적 시간을 재고 표로 정리한다.
-
-    fetch와 CSV 쓰기는 번갈아 일어나므로 한 번씩 재서는 의미가 없다.
-    구간 이름별로 누적해서 "전체 중 어디에 시간을 썼는지"를 본다.
-    """
-
-    def __init__(self, order: Sequence[str] = ()) -> None:
-        """
-        Args:
-            order: 보고서에 표시할 구간 순서. 미리 정해두면 실제로 처음 호출된
-                순서(예: 헤더를 먼저 쓰느라 'CSV 쓰기'가 앞서는 경우)와 무관하게
-                파이프라인 흐름대로 읽힌다.
-        """
-        self._elapsed: Dict[str, float] = {name: 0.0 for name in order}
-        self._order: List[str] = list(order)
-        self._started = time.monotonic()
-
-    @contextlib.contextmanager
-    def measure(self, name: str) -> Iterator[None]:
-        if name not in self._elapsed:
-            self._elapsed[name] = 0.0
-            self._order.append(name)
-        start = time.monotonic()
-        try:
-            yield
-        finally:
-            self._elapsed[name] += time.monotonic() - start
-
-    @property
-    def total(self) -> float:
-        """프로그램 시작부터 지금까지의 실제 경과 시간."""
-        return time.monotonic() - self._started
-
-    def report(self) -> str:
-        # 한 번도 실행되지 않은 구간은 굳이 보여주지 않는다
-        names = [n for n in self._order if self._elapsed[n] > 0]
-        measured = sum(self._elapsed.values())
-        total = self.total
-        width = max((display_width(n) for n in names), default=0)
-        width = max(width, display_width("기타"), display_width("합계"))
-
-        lines = ["", "=== 구간별 소요 시간 ==="]
-        for index, name in enumerate(names, 1):
-            seconds = self._elapsed[name]
-            share = seconds / total * 100 if total > 0 else 0.0
-            lines.append(f"  {index}. {pad(name, width)}  {seconds:8.3f}초  {share:5.1f}%")
-
-        # 측정 구간 밖에서 흘러간 시간(인자 처리, 파일 열기, 리포트 출력 등)
-        other = total - measured
-        if other > 0.001:
-            share = other / total * 100 if total > 0 else 0.0
-            lines.append(f"     {pad('기타', width)}  {other:8.3f}초  {share:5.1f}%")
-
-        lines.append("  " + "─" * (width + 21))
-        lines.append(f"     {pad('합계', width)}  {total:8.3f}초  100.0%")
-        return "\n".join(lines)
 
 
 #: 보고서에 표시할 구간 순서 (실제 실행 흐름대로)
@@ -454,7 +387,7 @@ def export(
     delimiter: str,
     null_string: str,
     write_header: bool,
-    progress_every: int,
+    reporter: Optional[progress.Progress] = None,
     quote: bool = False,
     escapechar: Optional[str] = "\\",
 ) -> int:
@@ -489,11 +422,11 @@ def export(
             writer.writerows(rows)
 
         total += len(rows)
-        if progress_every and total % progress_every < len(rows):
-            elapsed = timer.total
-            rate = total / elapsed if elapsed > 0 else 0
-            print(f"  {total:,}건 ({rate:,.0f} rows/s)", file=sys.stderr)
+        if reporter is not None:
+            reporter.update(total)
 
+    if reporter is not None:
+        reporter.finish()
     return total
 
 
@@ -620,6 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     appconfig.add_config_arguments(parser)
+    progress.add_progress_argument(parser)
 
     # 설정 파일에서 채울 수 있는 값은 기본값을 None 으로 둔다. 그래야 사용자가
     # 직접 준 값과 argparse 기본값을 구분해 우선순위를 매길 수 있다.
@@ -705,9 +639,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="NULL을 표시할 문자열 (기본: 빈 값). 예: --null-string '\\N'",
     )
     out.add_argument("--batch-size", type=int, default=50_000, help="fetchmany 크기")
-    out.add_argument(
-        "--progress-every", type=int, default=100_000, help="진행 상황 출력 간격(행)"
-    )
+
     return parser
 
 
@@ -721,100 +653,106 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     args = parser.parse_args(argv)
-    apply_config(args, load_impala_settings(args), parser, load_sql_settings(args))
     timer = PhaseTimer(PHASES)
-
-    query = read_query(args)
-    session_settings = parse_session_settings(args.set)
-    password = resolve_password(args) if args.auth_mechanism != NO_AUTH else None
-    connect_kwargs = build_connect_kwargs(args, password)
-
-    # 지연 임포트: --help는 impyla 없이도 뜬다.
-    # impyla가 없거나 impala.py 파일에 가려져 있으면 원인을 짚어 알려준다.
-    if args.debug:
-        # impyla와 thrift_sasl이 핸드셰이크 과정을 DEBUG로 남긴다
-        import logging
-
-        logging.basicConfig(
-            level=logging.DEBUG, stream=sys.stderr, format="%(name)s %(levelname)s %(message)s"
-        )
-        # 서버로 보내는 SQL. 파일 내용 그대로다.
-        print(f"--- 실행할 SQL ---\n{query}\n------------------", file=sys.stderr)
-
     try:
-        dbapi = import_impala_dbapi()
-        check_auth_dependencies(args.auth_mechanism)
-        if args.sasl_backend == "sasl" and args.auth_mechanism != NO_AUTH:
-            use_cyrus_sasl()
-    except ImportError as exc:
-        print(f"오류: {exc}", file=sys.stderr)
-        return 3
+        apply_config(args, load_impala_settings(args), parser, load_sql_settings(args))
 
-    transport = "HTTP" if args.http_transport else "바이너리"
-    tls = "평문" if args.no_ssl else "TLS"
-    who = f"{args.user}@" if args.auth_mechanism != NO_AUTH else ""
-    # HTTP 전송은 SASL이 아니라 HTTP 기본 인증 헤더를 쓴다
-    sasl = ""
-    if args.auth_mechanism != NO_AUTH and not args.http_transport:
-        sasl = f", SASL {args.auth_mechanism}/{args.sasl_backend}"
-    print(
-        f"접속: {who}{args.host}:{args.port} ({tls}, {args.auth_mechanism}, {transport} 전송{sasl})",
-        file=sys.stderr,
-    )
+        query = read_query(args)
+        session_settings = parse_session_settings(args.set)
+        password = resolve_password(args) if args.auth_mechanism != NO_AUTH else None
+        connect_kwargs = build_connect_kwargs(args, password)
 
-    try:
-        with timer.measure("Impala 접속"):
-            conn = dbapi.connect(**connect_kwargs)
-    except Exception as exc:
-        # 전송 오류(EOF 등)는 메시지만으로 원인을 알기 어려워 점검 목록을 붙여준다.
-        # impyla 설치에 따라 thrift와 thriftpy2 중 어느 쪽을 쓰는지 달라지므로
-        # 모듈 경로로 잡지 않고 예외 이름으로 판별한다.
-        if type(exc).__name__ != "TTransportException":
-            raise
-        print(f"\n접속 실패: {exc}\n", file=sys.stderr)
-        print(transport_error_hint(args), file=sys.stderr)
-        return 4
+        # 지연 임포트: --help는 impyla 없이도 뜬다.
+        # impyla가 없거나 impala.py 파일에 가려져 있으면 원인을 짚어 알려준다.
+        if args.debug:
+            # impyla와 thrift_sasl이 핸드셰이크 과정을 DEBUG로 남긴다
+            import logging
 
-    try:
-        cursor = conn.cursor()
+            logging.basicConfig(
+                level=logging.DEBUG, stream=sys.stderr, format="%(name)s %(levelname)s %(message)s"
+            )
+            # 서버로 보내는 SQL. 파일 내용 그대로다.
+            print(f"--- 실행할 SQL ---\n{query}\n------------------", file=sys.stderr)
+
         try:
-            for key, value in session_settings.items():
-                cursor.execute(f"SET {key}={value}")
+            dbapi = import_impala_dbapi()
+            check_auth_dependencies(args.auth_mechanism)
+            if args.sasl_backend == "sasl" and args.auth_mechanism != NO_AUTH:
+                use_cyrus_sasl()
+        except ImportError as exc:
+            print(f"오류: {exc}", file=sys.stderr)
+            return 3
 
-            with open_output(args.output, args.gzip, args.encoding) as handle:
-                rows = export(
-                    cursor,
-                    query,
-                    handle,
-                    timer,
-                    batch_size=args.batch_size,
-                    delimiter=args.delimiter,
-                    null_string=args.null_string,
-                    write_header=not args.no_header,
-                    progress_every=args.progress_every,
-                    quote=args.quote,
-                    escapechar=args.escapechar,
-                )
+        transport = "HTTP" if args.http_transport else "바이너리"
+        tls = "평문" if args.no_ssl else "TLS"
+        who = f"{args.user}@" if args.auth_mechanism != NO_AUTH else ""
+        # HTTP 전송은 SASL이 아니라 HTTP 기본 인증 헤더를 쓴다
+        sasl = ""
+        if args.auth_mechanism != NO_AUTH and not args.http_transport:
+            sasl = f", SASL {args.auth_mechanism}/{args.sasl_backend}"
+        print(
+            f"접속: {who}{args.host}:{args.port} ({tls}, {args.auth_mechanism}, {transport} 전송{sasl})",
+            file=sys.stderr,
+        )
+
+        try:
+            with timer.measure("Impala 접속"):
+                conn = dbapi.connect(**connect_kwargs)
         except Exception as exc:
-            hint = query_error_hint(query, exc)
-            if not hint:
+            # 전송 오류(EOF 등)는 메시지만으로 원인을 알기 어려워 점검 목록을 붙여준다.
+            # impyla 설치에 따라 thrift와 thriftpy2 중 어느 쪽을 쓰는지 달라지므로
+            # 모듈 경로로 잡지 않고 예외 이름으로 판별한다.
+            if type(exc).__name__ != "TTransportException":
                 raise
-            print(f"\n쿼리 실행 실패: {exc}\n", file=sys.stderr)
-            print(hint, file=sys.stderr)
-            return 5
-        finally:
-            cursor.close()
-    finally:
-        conn.close()
+            print(f"\n접속 실패: {exc}\n", file=sys.stderr)
+            print(transport_error_hint(args), file=sys.stderr)
+            return 4
 
-    size = os.path.getsize(args.output)
-    elapsed = timer.total
-    print(timer.report())
-    print()
-    print(f"{args.output}  {human(size)}  {rows:,}행")
-    if elapsed > 0:
-        print(f"평균 {rows / elapsed:,.0f} rows/s")
-    return 0
+        try:
+            cursor = conn.cursor()
+            try:
+                for key, value in session_settings.items():
+                    cursor.execute(f"SET {key}={value}")
+
+                reporter = progress.Progress(
+                    "읽는 중", unit="행", enabled=not args.no_progress
+                )
+                with open_output(args.output, args.gzip, args.encoding) as handle:
+                    rows = export(
+                        cursor,
+                        query,
+                        handle,
+                        timer,
+                        batch_size=args.batch_size,
+                        delimiter=args.delimiter,
+                        null_string=args.null_string,
+                        write_header=not args.no_header,
+                        reporter=reporter,
+                        quote=args.quote,
+                        escapechar=args.escapechar,
+                    )
+            except Exception as exc:
+                hint = query_error_hint(query, exc)
+                if not hint:
+                    raise
+                print(f"\n쿼리 실행 실패: {exc}\n", file=sys.stderr)
+                print(hint, file=sys.stderr)
+                return 5
+            finally:
+                cursor.close()
+        finally:
+            conn.close()
+
+        size = os.path.getsize(args.output)
+        elapsed = timer.total
+        # 보고는 stdout 이 아니라 stderr 로 낸다. stdout 은 데이터 몫이다.
+        print(f"{args.output}  {human(size)}  {rows:,}행", file=sys.stderr)
+        if elapsed > 0:
+            print(f"평균 {rows / elapsed:,.0f} rows/s", file=sys.stderr)
+        return 0
+    finally:
+        # 성공하든 실패하든 어디에 시간을 썼는지는 항상 남긴다
+        timer.print_report()
 
 
 if __name__ == "__main__":

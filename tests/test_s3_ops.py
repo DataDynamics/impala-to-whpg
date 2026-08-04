@@ -101,6 +101,8 @@ def args_for(command: str, **overrides) -> argparse.Namespace:
         command=command,
         config=None,
         no_config=True,       # 테스트는 기본 설정 파일을 읽지 않는다
+        no_progress=True,
+        debug=False,
         bucket=None,
         access_key=None,
         secret_key=None,
@@ -416,6 +418,43 @@ def test_no_arguments_does_not_build_a_client(monkeypatch, capsys):
 def test_help_examples_use_the_bin_name(capsys):
     s.main([])
     assert "bin/s3-ops ls" in capsys.readouterr().out
+
+
+def test_command_failure_is_summarised_not_dumped(fake_boto3, capsys, monkeypatch):
+    """크론 메일에 수백 줄짜리 스택 트레이스가 실리면 안 된다."""
+    def boom(*a, **kw):
+        raise RuntimeError("연결 실패")
+
+    monkeypatch.setitem(s.COMMANDS, "ls", boom)
+    assert s.main(["--no-config", "ls", "s3://b/k/"]) == 5
+    err = capsys.readouterr().err
+    assert "실패: RuntimeError: 연결 실패" in err
+    assert "Traceback" not in err
+
+
+def test_debug_reraises_for_the_full_traceback(fake_boto3, monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError("연결 실패")
+
+    monkeypatch.setitem(s.COMMANDS, "ls", boom)
+    with pytest.raises(RuntimeError):
+        s.main(["--no-config", "--debug", "ls", "s3://b/k/"])
+
+
+def test_timing_report_is_printed_even_on_failure(fake_boto3, capsys, monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError("실패")
+
+    monkeypatch.setitem(s.COMMANDS, "ls", boom)
+    s.main(["--no-config", "ls", "s3://b/k/"])
+    assert "구간별 소요 시간" in capsys.readouterr().err
+
+
+def test_timing_report_goes_to_stderr(fake_boto3, capsys):
+    s.main(["--no-config", "ls", "s3://dw-stage/none/"])
+    captured = capsys.readouterr()
+    assert "구간별 소요 시간" in captured.err
+    assert "구간별 소요 시간" not in captured.out
 
 
 # -- 목록 -------------------------------------------------------------------------

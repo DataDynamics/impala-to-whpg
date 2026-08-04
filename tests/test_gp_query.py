@@ -22,6 +22,7 @@ class FakeCursor:
     def __init__(self, columns=None, rows=None, rowcount=-1) -> None:
         self.description = [(c,) for c in columns] if columns else None
         self._rows = list(rows or [])
+        self._offset = 0
         self.rowcount = rowcount
         self.executed: List[str] = []
         self.closed = False
@@ -31,6 +32,11 @@ class FakeCursor:
 
     def fetchall(self):
         return list(self._rows)
+
+    def fetchmany(self, size: int):
+        batch = self._rows[self._offset : self._offset + size]
+        self._offset += len(batch)
+        return batch
 
     def close(self) -> None:
         self.closed = True
@@ -108,6 +114,7 @@ def args_for(**overrides) -> argparse.Namespace:
         no_header=False,
         null_string="",
         max_rows=100,
+        no_progress=True,
     )
     options.update(overrides)
     return argparse.Namespace(**options)
@@ -367,6 +374,42 @@ def test_output_of_decimal_keeps_precision(tmp_path):
         args_for(output=str(path), no_header=True),
     )
     assert path.read_text(encoding="utf-8").strip() == "10.50"
+
+
+def test_timing_report_is_printed_on_success(fake_psycopg2, tmp_path, capsys):
+    fake_psycopg2["cursor"] = FakeCursor(rowcount=0)
+    run_main(fake_psycopg2, ["-q", "SELECT 1"], tmp_path)
+    captured = capsys.readouterr()
+    assert "구간별 소요 시간" in captured.err
+    assert "구간별 소요 시간" not in captured.out   # stdout 은 데이터 몫
+
+
+def test_timing_report_is_printed_on_failure(fake_psycopg2, tmp_path, capsys):
+    class Failing(FakeCursor):
+        def execute(self, sql):
+            raise RuntimeError("실패")
+
+    fake_psycopg2["cursor"] = Failing()
+    run_main(fake_psycopg2, ["-q", "SELECT 1"], tmp_path)
+    assert "구간별 소요 시간" in capsys.readouterr().err
+
+
+def test_results_are_fetched_in_batches(fake_psycopg2, tmp_path):
+    """fetchall 로 한 번에 받으면 진행 상황을 보여줄 수 없다."""
+    calls = []
+
+    class Counting(FakeCursor):
+        def fetchmany(self, size):
+            calls.append(size)
+            return super().fetchmany(size)
+
+        def fetchall(self):
+            raise AssertionError("fetchall 을 쓰면 안 된다")
+
+    rows = [(date(2026, 8, 1), "s", i) for i in range(25_000)]
+    fake_psycopg2["cursor"] = Counting(COLUMNS, rows)
+    run_main(fake_psycopg2, ["-q", "SELECT 1", "-o", str(tmp_path / "o.csv")], tmp_path)
+    assert len(calls) > 1
 
 
 # -- 트랜잭션 ----------------------------------------------------------------------

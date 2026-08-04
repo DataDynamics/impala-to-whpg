@@ -32,11 +32,12 @@ import gzip
 import os
 import sys
 import time
-import unicodedata
 from typing import Any, Dict, Iterator, List, Optional, Sequence, TextIO
 
 import appconfig
+import progress
 import sqlfile
+from progress import PhaseTimer, display_width, pad
 
 #: 설정의 greenplum 섹션에서 읽어 쓰는 키. 나머지 키는 무시한다.
 GREENPLUM_SETTINGS = (
@@ -50,6 +51,12 @@ GREENPLUM_SETTINGS = (
     "connect_timeout",
     "session_sql",
 )
+
+#: 보고서에 표시할 구간 순서 (실제 실행 흐름대로)
+PHASES = ("Greenplum 접속", "세션 설정", "쿼리 실행 요청", "결과 수신", "결과 출력")
+
+#: 결과를 나눠 받는 단위. 진행 상황을 보여주려면 한 번에 다 받으면 안 된다.
+FETCH_SIZE = 10_000
 
 #: 표로 보여줄 때 기본으로 출력할 최대 행 수. 0이면 제한 없음.
 DEFAULT_MAX_ROWS = 100
@@ -147,16 +154,6 @@ def build_connect_kwargs(args: argparse.Namespace, password: Optional[str]) -> D
     return kwargs
 
 
-def display_width(text: str) -> int:
-    """터미널에서 차지하는 칸 수. 한글·한자는 두 칸을 쓴다."""
-    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
-
-
-def pad(text: str, width: int) -> str:
-    """표시 폭 기준으로 오른쪽을 채운다(한글이 섞여도 열이 맞는다)."""
-    return text + " " * max(0, width - display_width(text))
-
-
 def format_value(value: Any, null_string: str) -> str:
     if value is None:
         return null_string
@@ -225,22 +222,60 @@ def column_names(description: Sequence[Any]) -> List[str]:
     return [d[0] for d in description]
 
 
-def run(cursor: Any, sql: str, args: argparse.Namespace) -> int:
+def fetch_rows(
+    cursor: Any, reporter: Optional[progress.Progress] = None
+) -> List[Sequence[Any]]:
+    """결과를 나눠 받는다.
+
+    fetchall 로 한 번에 받으면 진행 상황을 보여줄 수가 없다. 오래 걸리는 조회에서
+    아무 반응 없이 멈춰 있는 것처럼 보이지 않도록 나눠 받으면서 알린다.
+    """
+    rows: List[Sequence[Any]] = []
+    while True:
+        batch = cursor.fetchmany(FETCH_SIZE)
+        if not batch:
+            break
+        rows.extend(batch)
+        if reporter is not None:
+            reporter.update(len(rows))
+    if reporter is not None:
+        reporter.finish()
+    return rows
+
+
+def run(
+    cursor: Any,
+    sql: str,
+    args: argparse.Namespace,
+    timer: Optional[PhaseTimer] = None,
+) -> int:
     """SQL을 실행하고 결과를 내보낸다. 종료 코드를 돌려준다."""
-    started = time.monotonic()
-    cursor.execute(sql)
-    elapsed = time.monotonic() - started
+    timer = timer or PhaseTimer(PHASES)
+    show_progress = not getattr(args, "no_progress", False)
+
+    with timer.measure("쿼리 실행 요청"):
+        cursor.execute(sql)
 
     if cursor.description is None:
         # INSERT/UPDATE/DELETE/DDL. rowcount 는 DDL 이면 -1 이다.
         affected = cursor.rowcount
         detail = f"{affected:,}행" if affected is not None and affected >= 0 else "완료"
-        print(f"{detail}, {elapsed:.2f}초", file=sys.stderr)
+        print(detail, file=sys.stderr)
         return 0
 
     columns = column_names(cursor.description)
-    rows = cursor.fetchall()
+    with timer.measure("결과 수신"):
+        rows = fetch_rows(
+            cursor,
+            progress.Progress("받는 중", unit="행", enabled=show_progress),
+        )
 
+    with timer.measure("결과 출력"):
+        return emit(columns, rows, args)
+
+
+def emit(columns: Sequence[str], rows: Sequence[Sequence[Any]], args: argparse.Namespace) -> int:
+    """받은 결과를 표나 CSV로 내보낸다."""
     if args.output:
         with open_output(args.output, args.gzip, args.encoding) as handle:
             written = write_csv(
@@ -252,7 +287,7 @@ def run(cursor: Any, sql: str, args: argparse.Namespace) -> int:
                 write_header=not args.no_header,
             )
         size = os.path.getsize(args.output)
-        print(f"{args.output}  {size:,} bytes  {written:,}행, {elapsed:.2f}초", file=sys.stderr)
+        print(f"{args.output}  {progress.human_bytes(size)}  {written:,}행", file=sys.stderr)
         return 0
 
     shown = rows if args.max_rows <= 0 else rows[: args.max_rows]
@@ -262,7 +297,7 @@ def run(cursor: Any, sql: str, args: argparse.Namespace) -> int:
         print(" | ".join(columns))
         print("(0행)")
 
-    note = f"{len(rows):,}행, {elapsed:.2f}초"
+    note = f"{len(rows):,}행"
     if len(shown) < len(rows):
         note += f" (앞 {len(shown):,}행만 표시 — 전부 보려면 --max-rows 0)"
     print(note, file=sys.stderr)
@@ -296,6 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     appconfig.add_config_arguments(parser)
+    progress.add_progress_argument(parser)
 
     # 설정 파일에서 채울 수 있는 값은 기본값을 None 으로 둔다. 그래야 사용자가
     # 직접 준 값과 argparse 기본값을 구분해 우선순위를 매길 수 있다.
@@ -371,53 +407,60 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     args = parser.parse_args(argv)
     apply_config(args, load_greenplum_settings(args), parser, sqlfile.load_sql_settings(args))
-
-    sql = sqlfile.read_query(args)
-    if args.debug:
-        print(f"--- 실행할 SQL ---\n{sql}\n------------------", file=sys.stderr)
-
+    timer = PhaseTimer(PHASES)
     try:
-        psycopg2 = import_psycopg2()
-    except ImportError as exc:
-        print(f"오류: {exc}", file=sys.stderr)
-        return 3
 
-    password = resolve_password(args)
-    print(
-        f"접속: {args.user}@{args.host}:{args.port}/{args.database}",
-        file=sys.stderr,
-    )
+        sql = sqlfile.read_query(args)
+        if args.debug:
+            print(f"--- 실행할 SQL ---\n{sql}\n------------------", file=sys.stderr)
 
-    try:
-        conn = psycopg2.connect(**build_connect_kwargs(args, password))
-    except Exception as exc:
-        print(f"\n접속 실패: {exc}", file=sys.stderr)
-        return 4
-
-    try:
-        cursor = conn.cursor()
         try:
-            if args.schema:
-                cursor.execute(f"SET search_path TO {args.schema}")
-            for statement in args.session_sql:
-                cursor.execute(statement)
+            psycopg2 = import_psycopg2()
+        except ImportError as exc:
+            print(f"오류: {exc}", file=sys.stderr)
+            return 3
 
-            code = run(cursor, sql, args)
+        password = resolve_password(args)
+        print(
+            f"접속: {args.user}@{args.host}:{args.port}/{args.database}",
+            file=sys.stderr,
+        )
+
+        try:
+            with timer.measure("Greenplum 접속"):
+                conn = psycopg2.connect(**build_connect_kwargs(args, password))
         except Exception as exc:
-            conn.rollback()
-            print(f"\n쿼리 실행 실패: {exc}", file=sys.stderr)
-            return 5
-        finally:
-            cursor.close()
+            print(f"\n접속 실패: {exc}", file=sys.stderr)
+            return 4
 
-        if args.dry_run:
-            conn.rollback()
-            print("--dry-run 이므로 롤백했습니다. 반영되지 않았습니다.", file=sys.stderr)
-        else:
-            conn.commit()
-        return code
+        try:
+            cursor = conn.cursor()
+            try:
+                with timer.measure("세션 설정"):
+                    if args.schema:
+                        cursor.execute(f"SET search_path TO {args.schema}")
+                    for statement in args.session_sql:
+                        cursor.execute(statement)
+
+                code = run(cursor, sql, args, timer)
+            except Exception as exc:
+                conn.rollback()
+                print(f"\n쿼리 실행 실패: {exc}", file=sys.stderr)
+                return 5
+            finally:
+                cursor.close()
+
+            if args.dry_run:
+                conn.rollback()
+                print("--dry-run 이므로 롤백했습니다. 반영되지 않았습니다.", file=sys.stderr)
+            else:
+                conn.commit()
+            return code
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        # 성공하든 실패하든 어디에 시간을 썼는지는 항상 남긴다
+        timer.print_report()
 
 
 if __name__ == "__main__":

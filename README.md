@@ -117,6 +117,94 @@ bin/impala-query-to-csv --host other-impala.example.com -q "SELECT 1" -o out.csv
 경고: 환경변수 IMPALA_PASSWORD 가 정의되지 않아 설정값을 건너뜁니다.
 ```
 
+## 소요 시간과 진행 상황
+
+**세 스크립트 모두 작업이 끝나면 구간별 소요 시간을 출력합니다.** 성공하든 실패하든
+항상 나오므로, 실패했을 때 어디까지 갔는지도 알 수 있습니다.
+
+```
+=== 구간별 소요 시간 ===
+  1. Impala 접속        0.412초    2.1%
+  2. 쿼리 실행 요청     1.203초    6.1%
+  3. 첫 배치 대기       8.442초   42.6%
+  4. 데이터 수신        6.120초   30.9%
+  5. CSV 쓰기           3.640초   18.4%
+     기타              0.002초    0.0%
+  ───────────────────────────────────
+     합계             19.817초  100.0%
+```
+
+오래 걸리는 구간에서는 진행 상황도 보여줍니다. 조회 행 수, 업로드·삭제 개수입니다.
+
+```
+  받는 중 1,300,000행  412,331행/s  3.2초
+```
+
+**보고는 전부 stderr로 나갑니다.** stdout은 조회 결과 같은 데이터 몫이라, 파이프로
+넘기거나 파일로 받을 때 섞이지 않습니다.
+
+```bash
+bin/gp-query -q "SELECT * FROM t" > data.txt     # data.txt 에는 표만 들어갑니다
+bin/gp-query -q "SELECT * FROM t" 2> /dev/null   # 보고만 버립니다
+```
+
+`--no-progress`로 진행 상황만 끌 수 있습니다. 소요 시간 요약은 그대로 나옵니다.
+
+## 크론에서 돌리기
+
+**crontab 항목은 한 줄이어야 합니다.** 셸과 달리 백슬래시로 줄을 이을 수 없고,
+`%`는 개행으로 해석되므로 `\%`로 이스케이프해야 합니다.
+
+```cron
+0 3 * * * /srv/impala-to-whpg/bin/impala-query-to-csv -f daily_orders.sql -V dt=$(date -d yesterday +\%Y-\%m-\%d) -o /data/orders.csv >> /var/log/etl.log 2>&1
+```
+
+길어지면 셸 스크립트로 감싸는 편이 읽기 쉽습니다.
+
+```bash
+#!/bin/bash
+# /srv/etl/daily-orders.sh
+set -euo pipefail
+export IMPALA_USER=etl_user IMPALA_PASSWORD="$(cat /etc/etl/impala.pw)"
+dt="$(date -d yesterday +%Y-%m-%d)"
+
+/srv/impala-to-whpg/bin/impala-query-to-csv -f daily_orders.sql -V "dt=$dt" \
+    -o "/data/orders-$dt.csv.gz" --gzip --delimiter $'\t' --null-string '\N' --no-header
+/srv/impala-to-whpg/bin/s3-ops upload "/data/orders-$dt.csv.gz" "s3://dw-stage/orders/$dt/"
+```
+
+```cron
+0 3 * * * /srv/etl/daily-orders.sh >> /var/log/etl.log 2>&1
+```
+
+크론에서 문제가 되는 것들은 스크립트 쪽에서 처리해 두었습니다.
+
+| 크론에서 생기는 문제 | 처리 |
+| --- | --- |
+| 작업 디렉터리가 임의 | 설정·SQL·인증서 경로를 **스크립트 위치 기준**으로 잡습니다. 어디서 실행해도 같은 파일을 씁니다. |
+| `LANG`이 없어 인코딩이 `ascii` | 래퍼가 `PYTHONIOENCODING=utf-8`을 넣습니다. 없으면 한글 출력에서 `UnicodeEncodeError`로 죽습니다. |
+| 출력이 버퍼에 갇힘 | 래퍼가 `PYTHONUNBUFFERED=1`을 넣습니다. 중간에 죽어도 로그가 남습니다. |
+| 진행 상황이 로그를 뒤덮음 | 터미널이 아니면 `\r` 대신 줄을 쓰고, 갱신 간격을 30초로 늘립니다. 몇 시간짜리 작업도 로그가 몇 줄 늘 뿐입니다. |
+| 금방 끝나는 작업의 잡음 | 첫 갱신 간격 안에 끝나면 진행 상황을 아예 남기지 않습니다. |
+| 프롬프트에서 멈춤 | 터미널이 아니면 비밀번호도 삭제 확인도 묻지 않습니다. `s3-ops`의 삭제는 `--yes` 없이는 거부합니다. |
+| 스택 트레이스로 가득한 메일 | 오류를 한 줄로 줄이고 종료 코드로 알립니다. 전체는 `--debug`로 봅니다. |
+
+`PATH`는 크론에서 좁으므로 `python3`이 `/usr/bin` 밖에 있으면 지정하세요.
+
+```cron
+PYTHON=/opt/python3.11/bin/python3
+```
+
+종료 코드로 실패를 판별할 수 있습니다.
+
+| 코드 | 뜻 |
+| --- | --- |
+| `0` | 성공 |
+| `2` | 인자가 잘못됨 (argparse) |
+| `3` | 필요한 파이썬 패키지 없음 |
+| `4` | 접속 실패 |
+| `5` | 쿼리·명령 실행 실패 |
+
 ## 문서
 
 올린 파일을 Greenplum에서 읽어들이는 쪽은 이 저장소의 코드가 아니라 Greenplum
@@ -144,6 +232,7 @@ Impala/Greenplum/S3 없이도 실행됩니다.
 src/
   appconfig.py            # conf/config.yaml 로딩, 환경변수 치환, 우선순위 규칙
   sqlfile.py              # sql/ 의 .sql 찾기, Jinja 템플릿 채우기
+  progress.py             # 구간별 소요 시간, 진행 상황 (크론 대응)
   impala_query_to_csv.py  # Impala 쿼리 → CSV 저장 (TLS + LDAP, 구간별 시간 측정)
   gp_query.py             # Greenplum SQL 실행 → 표 또는 CSV
   s3_ops.py               # S3 업로드·삭제·디렉터리 생성/삭제·목록
@@ -342,7 +431,7 @@ orders.csv  182.4MB  1,240,331행
   않습니다.
 - 엑셀에서 한글이 깨지면 `--encoding utf-8-sig`를 쓰세요.
 - 그 밖에 `--gzip`, `--null-string`, `--query-file`, `--var KEY=VALUE`,
-  `--set KEY=VALUE`를 지원합니다. 자세한 건 `--help`를 보세요.
+  `--set KEY=VALUE`, `--no-progress`를 지원합니다. 자세한 건 `--help`를 보세요.
 
 ### 구분자와 따옴표
 

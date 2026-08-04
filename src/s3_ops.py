@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import appconfig
+import progress
+from progress import PhaseTimer
 
 #: delete_objects 는 요청당 1000개까지만 받는다
 DELETE_BATCH = 1000
@@ -59,12 +61,10 @@ def as_directory(key: str) -> str:
     return key if key.endswith("/") else key + "/"
 
 
-def human(size: float) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(size) < 1024 or unit == "GB":
-            return f"{size:,.1f}{unit}"
-        size /= 1024
-    return f"{size:,.1f}GB"
+#: 보고서에 표시할 구간 순서 (실제 실행 흐름대로)
+PHASES = ("설정·클라이언트 준비", "명령 실행")
+
+human = progress.human_bytes
 
 
 def resolve_target(uri: str, default_bucket: Optional[str]) -> Tuple[str, str]:
@@ -141,9 +141,15 @@ def list_objects(client: Any, bucket: str, prefix: str) -> List[Dict[str, Any]]:
     ]
 
 
-def delete_keys(client: Any, bucket: str, keys: Sequence[str]) -> int:
+def delete_keys(
+    client: Any,
+    bucket: str,
+    keys: Sequence[str],
+    reporter: Optional[progress.Progress] = None,
+) -> int:
     """키 목록을 1000개씩 묶어 지우고 실제로 지운 개수를 돌려준다."""
     deleted = 0
+    processed = 0
     for start in range(0, len(keys), DELETE_BATCH):
         batch = keys[start : start + DELETE_BATCH]
         response = client.delete_objects(
@@ -157,6 +163,11 @@ def delete_keys(client: Any, bucket: str, keys: Sequence[str]) -> int:
                 file=sys.stderr,
             )
         deleted += len(batch) - len(errors)
+        processed += len(batch)
+        if reporter is not None:
+            reporter.update(processed)
+    if reporter is not None:
+        reporter.finish()
     return deleted
 
 
@@ -220,7 +231,14 @@ def cmd_upload(client: Any, args: argparse.Namespace, bucket: Optional[str] = No
         extra["ServerSideEncryption"] = args.sse
 
     total_bytes = 0
-    for local, target in pairs:
+    # 파일이 여러 개일 때만 진행 상황을 낸다. 하나뿐이면 결과 줄로 충분하다.
+    reporter = progress.Progress(
+        "업로드",
+        total=len(pairs),
+        unit="개",
+        enabled=len(pairs) > 1 and not getattr(args, "no_progress", False),
+    )
+    for done, (local, target) in enumerate(pairs, 1):
         size = os.path.getsize(local)
         if args.dry_run:
             print(f"[예행] {local} → s3://{bucket}/{target} ({human(size)})")
@@ -228,7 +246,9 @@ def cmd_upload(client: Any, args: argparse.Namespace, bucket: Optional[str] = No
         # upload_file 은 큰 파일을 알아서 멀티파트로 나눠 올린다
         client.upload_file(local, bucket, target, ExtraArgs=extra or None)
         total_bytes += size
+        reporter.update(done)
         print(f"{local} → s3://{bucket}/{target} ({human(size)})")
+    reporter.finish()
 
     if not args.dry_run:
         print(f"\n{len(pairs)}개 업로드, 합계 {human(total_bytes)}")
@@ -310,7 +330,17 @@ def cmd_rmdir(client: Any, args: argparse.Namespace, bucket: Optional[str] = Non
         print("취소했습니다.")
         return 1
 
-    deleted = delete_keys(client, bucket, [o["Key"] for o in objects])
+    deleted = delete_keys(
+        client,
+        bucket,
+        [o["Key"] for o in objects],
+        progress.Progress(
+            "삭제",
+            total=len(objects),
+            unit="개",
+            enabled=len(objects) > DELETE_BATCH and not getattr(args, "no_progress", False),
+        ),
+    )
     print(f"{deleted}개 삭제했습니다.")
     return 0 if deleted == len(objects) else 1
 
@@ -350,6 +380,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     appconfig.add_config_arguments(parser)
+    progress.add_progress_argument(parser)
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="오류가 나면 전체 스택 트레이스를 출력합니다.",
+    )
     connection = parser.add_argument_group("접속")
     connection.add_argument(
         "-b",
@@ -417,8 +453,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     args = parser.parse_args(argv)
-    client, bucket = make_client(args)
-    return COMMANDS[args.command](client, args, bucket)
+    timer = PhaseTimer(PHASES)
+
+    with timer.measure("설정·클라이언트 준비"):
+        client, bucket = make_client(args)
+
+    try:
+        with timer.measure("명령 실행"):
+            return COMMANDS[args.command](client, args, bucket)
+    except Exception as exc:
+        # 크론 메일에 수백 줄짜리 스택 트레이스가 실리지 않게 한 줄로 줄인다.
+        # 전체가 필요하면 --debug 로 본다.
+        if args.debug:
+            raise
+        print(f"\n실패: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print("  전체 오류를 보려면 --debug 를 주세요.", file=sys.stderr)
+        return 5
+    finally:
+        # 성공하든 실패하든 어디에 시간을 썼는지는 항상 남긴다
+        timer.print_report()
 
 
 if __name__ == "__main__":
