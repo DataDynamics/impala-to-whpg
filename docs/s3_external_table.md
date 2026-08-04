@@ -109,6 +109,12 @@ DROP EXTERNAL TABLE ext_orders_20260801;
   백틱(`` ` ``)이고 NULL은 빈 문자열입니다. 위 SQL처럼 TEXT 포맷으로 읽으려면 파일을
   뽑을 때 `--delimiter $'\t' --null-string '\N'` 을 주는 편이 편합니다. 헤더 행을
   넣었다면 `--no-header` 로 빼거나, `FORMAT 'CSV' (HEADER)` 로 읽어야 합니다.
+
+  올린 파일이 실제로 어떤 모양인지는 `head` 로 확인합니다. `.gz` 는 알아서 풉니다.
+
+  ```bash
+  bin/s3-ops head s3://dw-stage/orders/2026-08-01/orders.csv.gz -n 3
+  ```
 - 외부 테이블 컬럼 타입은 **대상 테이블의 실제 타입** 을 그대로 따라가세요. 그래야
   `INSERT ... SELECT` 에서 불필요한 캐스팅이나 타입 불일치가 생기지 않습니다.
 - LOCATION의 접두사는 슬래시로 끝내야 그 아래 파일을 모두 읽습니다.
@@ -144,7 +150,18 @@ bin/s3-ops upload ./out/ s3://dw-stage/orders/202608/ --recursive
 SELECT count(*) FROM gp_segment_configuration WHERE content >= 0 AND role = 'p';
 ```
 
-올라간 파일 개수와 크기 분포는 `bin/s3-ops ls` 로 확인할 수 있습니다.
+올라간 파일 개수와 크기 분포는 `--summary` 로 확인합니다.
+
+```bash
+bin/s3-ops ls s3://dw-stage/orders/202608/ --summary
+```
+
+```
+파일 80개, 합계 9.8GB
+최소 118.2MB / 평균 125.4MB / 최대 131.0MB
+```
+
+세그먼트가 16대인데 파일이 3개로 나오면 13대가 논다는 뜻입니다.
 
 ## 5. 정리
 
@@ -159,8 +176,22 @@ bin/s3-ops rmdir s3://dw-stage/orders/2026-08-01/ --yes    # 확인 없이
 `rmdir` 은 그 접두사로 시작하는 오브젝트를 **전부** 지웁니다. 접두사가 비어 있으면
 (`s3://버킷/`) 버킷 전체 삭제를 막기 위해 거부합니다.
 
-디버깅할 때는 지우지 말고 파일을 직접 열어보세요. 목록과 내용을 확인하는 방법은
-[boto3로 S3 버킷·파일 목록 보기](boto3.md)에 정리해 두었습니다.
+실행 단위로 접두사를 나눠 뒀다면 `--older-than` 으로 기간이 지난 것만 한 번에
+정리할 수 있습니다. 크론에 걸어두면 파일이 쌓이지 않습니다.
+
+```bash
+bin/s3-ops rmdir s3://dw-stage/orders/ --older-than 7d --yes
+```
+
+바로 지우지 않고 남겨둘 거라면 `archive/` 로 옮겨두는 방법도 있습니다. 서버측
+복사라 파일을 받아 다시 올리지 않습니다.
+
+```bash
+bin/s3-ops mv s3://dw-stage/orders/2026-08-01/ s3://dw-stage/archive/2026-08-01/ -r
+```
+
+디버깅할 때는 지우지 말고 `bin/s3-ops head` 로 파일을 열어보세요. 그 밖에 목록과
+내용을 확인하는 방법은 [boto3로 S3 버킷·파일 목록 보기](boto3.md)에 있습니다.
 
 Greenplum 쪽 `INSERT ... SELECT` 는 한 트랜잭션이라 실패하면 롤백됩니다. S3 파일만
 정리하면 깨끗한 상태로 되돌아갑니다.

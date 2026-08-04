@@ -334,7 +334,7 @@ SELECT * FROM ext_probe LIMIT 5;
 | `Failed to connect to ... 5888` | 해당 세그먼트 호스트의 PXF가 죽어 있습니다. `pxf cluster status` |
 | `AccessDenied` / `403` | `s3-site.xml` 의 키 또는 버킷 정책. 업로드용 자격증명과 별개입니다. |
 | 일부 세그먼트에서만 실패 | `pxf cluster sync` 누락. 마스터만 바뀐 상태입니다. |
-| 결과가 비어 있음 | LOCATION 접두사에 파일이 있는지 확인하세요(`bin/s3-ops ls`). |
+| 결과가 비어 있음 | LOCATION 접두사에 파일이 있는지 확인하세요(`bin/s3-ops ls`). 내용까지 보려면 `bin/s3-ops head`. |
 
 로그는 각 세그먼트 호스트의 `$PXF_LOGDIR/pxf-service.log` 에 쌓입니다. 실패한
 호스트에서 직접 열어보는 게 가장 빠릅니다.

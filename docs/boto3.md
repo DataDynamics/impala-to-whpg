@@ -63,6 +63,9 @@ etl-logs	2024-06-18
 `list_buckets` 는 **리전과 무관하게 계정의 모든 버킷** 을 돌려줍니다. 클라이언트를
 만들 때 지정한 리전은 여기에 영향을 주지 않습니다.
 
+같은 것을 `bin/s3-ops buckets` 로 볼 수 있고, `--show-region` 을 주면 아래 절처럼
+버킷마다 리전도 함께 보여줍니다.
+
 ### 리전까지 함께 보기
 
 버킷마다 리전이 다를 수 있고, Greenplum의 `s3` 프로토콜은 엔드포인트를 리전별로
@@ -207,6 +210,8 @@ summarize("dw-stage", "orders/")
 쿼리를 쪼개 파일을 더 잘게 나누세요. 자세한 내용은
 [S3 외부 테이블로 읽기](s3_external_table.md)에 있습니다.
 
+같은 것을 `bin/s3-ops ls s3://버킷/접두사/ --summary` 로 바로 볼 수 있습니다.
+
 ## 4. 실행 단위로 묶어 보기 (Delimiter)
 
 실행 단위마다 `{테이블명}/{날짜}/` 처럼 접두사를 나눠 올렸다면,
@@ -270,6 +275,9 @@ print(f"총 {len(stale)}개, {sum(o['Size'] for o in stale) / 1024**3:.2f}GB")
 `LastModified` 는 UTC 기준 timezone-aware `datetime` 이므로, 비교 대상도
 `timezone.utc` 를 붙여야 합니다. naive datetime과 비교하면 `TypeError` 가 납니다.
 
+찾기만 할 거라면 `bin/s3-ops ls ... --older-than 24h`, 지우는 것까지면
+`bin/s3-ops rmdir ... --older-than 7d --yes` 로 됩니다.
+
 지운다면 `delete_objects` 로 한 번에 최대 1000개씩 묶어 보냅니다.
 
 ```python
@@ -318,6 +326,9 @@ peek("dw-stage", "orders/2026-08-01/orders.csv.gz")
 `get_object` 의 `Body` 는 스트리밍 객체라서 `gzip.open` 에 그대로 넘길 수 있습니다.
 전체를 메모리에 올리지 않습니다.
 
+같은 일을 `bin/s3-ops head s3://버킷/키` 가 합니다. `Range` 로 앞부분만 받고
+`.gz` 는 알아서 풉니다.
+
 ## 7. 파일 하나의 메타데이터만 확인
 
 존재 여부와 크기만 알면 될 때는 `head_object` 가 가볍습니다.
@@ -341,6 +352,13 @@ def exists(bucket: str, key: str) -> bool:
 
 없는 키에 대해 `404` 를 그냥 삼키면 권한 문제(`403`)까지 "없음"으로 처리되니,
 위처럼 에러 코드를 구분해서 다뤄야 합니다.
+
+`bin/s3-ops exists` 가 같은 구분을 종료 코드로 알려줍니다. 있으면 `0`, 없으면 `1`,
+권한이 없으면 `5` 입니다. 셸 조건문에 바로 쓸 수 있습니다.
+
+```bash
+if bin/s3-ops exists -q s3://dw-stage/orders/2026-08-01/_DONE; then ...
+```
 
 ## 8. 설정 파일을 그대로 재사용하기
 
