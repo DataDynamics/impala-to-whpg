@@ -207,9 +207,13 @@ def test_print_report_goes_to_stderr(capsys):
 
 BIN_SCRIPTS = sorted(pth for pth in (ROOT / "bin").iterdir() if pth.is_file())
 
+#: 인자 없이 실행하면 도움말을 내는 것들. 셸 래퍼는 대화형으로 들어가므로 제외한다.
+USAGE_SCRIPTS = [p for p in BIN_SCRIPTS if not p.name.endswith("-shell")]
+
 
 def test_bin_scripts_exist():
-    assert len(BIN_SCRIPTS) == 3
+    assert len(BIN_SCRIPTS) == 5
+    assert len(USAGE_SCRIPTS) == 3
 
 
 @pytest.mark.parametrize("script", BIN_SCRIPTS, ids=lambda s: s.name)
@@ -240,11 +244,27 @@ def test_bin_script_resolves_its_own_location(script):
 def test_bin_script_runs_from_an_unrelated_directory(script, tmp_path):
     """LANG 과 PATH 를 크론처럼 좁혀도 도움말이 떠야 한다."""
     result = subprocess.run(
+        [str(script), "--help"],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
+
+
+@pytest.mark.parametrize("script", USAGE_SCRIPTS, ids=lambda s: s.name)
+def test_bin_script_without_arguments_shows_usage(script, tmp_path):
+    result = subprocess.run(
         [str(script)],
         cwd=tmp_path,
         env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         timeout=60,
     )
     assert result.returncode == 0, result.stderr

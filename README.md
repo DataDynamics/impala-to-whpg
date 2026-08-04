@@ -6,6 +6,7 @@ Impala 조회, Greenplum 실행, S3 조작을 위한 명령행 도구 모음입�
 | --- | --- |
 | `bin/impala-query` | Impala에 쿼리를 실행하고 결과를 표나 CSV로 보여줍니다. 구간별 소요 시간도 함께. |
 | `bin/gp-query` | Greenplum에 SQL을 실행하고 결과를 표나 CSV로 보여줍니다. |
+| `bin/impala-shell` `bin/gp-shell` | 대화형 SQL 셸. `beeline`·`sqlplus` 처럼 붙어서 주고받습니다. |
 | `bin/s3-ops` | S3 업로드·다운로드·복사·이동·삭제·목록·내용 확인. |
 
 pip로 설치하지 않고 저장소에서 바로 실행합니다. `bin/` 아래 스크립트가 소스 위치를
@@ -19,6 +20,8 @@ bin/impala-query
 bin/gp-query
 bin/s3-ops
 ```
+
+셸은 예외입니다. 인자 없이 실행하면 바로 접속합니다(`--help` 로 도움말).
 
 ## 설치
 
@@ -214,6 +217,70 @@ bin/s3-ops rmdir    s3://dw-stage/orders/ --older-than 7d --yes
 확인할 때 쓰세요. 각 명령의 동작과 안전장치는 [S3 파일 다루기](#s3-파일-다루기)에
 있습니다.
 
+### 대화형 셸
+
+`beeline`·`sqlplus` 처럼 붙어서 쿼리를 주고받습니다. `conf/config.yaml` 의 접속
+정보를 그대로 쓰므로 인자 없이 바로 열립니다.
+
+```bash
+bin/gp-shell                 # bin/gp-query -i 와 같습니다
+bin/impala-shell
+bin/gp-shell --host other-gp.example.com   # 개별 값 덮어쓰기도 그대로
+```
+
+```
+dw=> SELECT order_dt, status, count(*)
+dw->   FROM staging.orders
+dw->  GROUP BY 1, 2;
+order_dt   | status   | count
+-----------+----------+------
+2026-08-01 | 결제완료 | 12
+2행
+dw=>
+```
+
+문장은 세미콜론으로 끝냅니다. 여러 줄로 이어 쓰면 프롬프트가 `->` 로 바뀝니다.
+따옴표나 주석 안의 세미콜론은 문장 끝으로 세지 않습니다.
+
+| 메타 명령 | 하는 일 |
+| --- | --- |
+| `\q` | 종료 (`Ctrl-D` 도 같음) |
+| `\?` | 도움말 |
+| `\i 파일.sql` | `sql/` 의 템플릿 실행 |
+| `\set 이름 값` / `\set` / `\unset 이름` | 템플릿 변수 지정 / 보기 / 지우기 |
+| `\o 파일.csv` / `\o` | 결과를 CSV로 / 화면으로 |
+| `\timing` | 구간별 소요 시간 표시 켜기·끄기 |
+| `\begin` `\commit` `\rollback` | 트랜잭션 (Greenplum) |
+
+**`\set` 과 `\i` 가 `sql/` 템플릿과 맞물립니다.** 변수를 한 번 정해두고 파일을
+실행하면 `--var` 와 같은 값이 채워집니다.
+
+```
+dw=> \set dt 2026-08-01
+dw=> \i order_summary.sql
+```
+
+**기본은 문장마다 바로 반영(autocommit)입니다.** 셸은 세션이 길어서 한 트랜잭션으로
+묶어두면 잠금이 계속 유지됩니다. 묶고 싶으면 `\begin` 을 쓰세요. 덕분에 `VACUUM`
+처럼 트랜잭션 블록 안에서 못 도는 문장도 셸에서는 실행됩니다.
+
+문장 하나가 실패해도 셸은 끝나지 않습니다. Greenplum 이면 실패한 트랜잭션을
+정리하므로 이후 문장이 계속 거부되는 일도 없습니다.
+
+파이프로도 씁니다. 터미널이 아니면 프롬프트와 히스토리를 끄고 순서대로 실행합니다.
+
+```bash
+echo "SELECT 1;" | bin/gp-shell
+bin/gp-shell < script.sql
+```
+
+히스토리는 `~/.impala-to-whpg/history-{greenplum,impala}` 에 권한 600 으로 둡니다.
+쿼리에 값이 그대로 들어 있어서 저장소 안에 두지 않습니다.
+
+아직 없는 것(2단계): 실행 중인 쿼리를 `Ctrl-C` 로 취소, `\d` 테이블 정보,
+Greenplum 의 `$$ ... $$` 인용. 함수 정의처럼 `$$` 안에 세미콜론이 들어가는 문장은
+`\i` 로 파일째 실행하세요.
+
 ### 종료 코드
 
 | 코드 | 뜻 | 쓰는 스크립트 |
@@ -336,7 +403,8 @@ src/
   appconfig.py         # conf/config.yaml 로딩, 환경변수 치환, 우선순위 규칙
   sqlfile.py           # sql/ 의 .sql 찾기, Jinja 템플릿 채우기
   progress.py          # 구간별 소요 시간, 진행 상황 (크론 대응)
-  table.py             # -o 없을 때의 표 출력, 필요한 만큼만 받기
+  table.py             # 표 출력과 CSV 쓰기, 필요한 만큼만 받기
+  shell.py             # 대화형 셸 (엔진 중립)
   impala_query.py      # Impala 쿼리 실행 → 표 또는 CSV (TLS + LDAP)
   gp_query.py          # Greenplum SQL 실행 → 표 또는 CSV
   s3_ops.py            # S3 업로드·삭제·디렉터리 생성/삭제·목록
@@ -344,6 +412,8 @@ src/
 bin/
   impala-query         # src/impala_query.py 실행 래퍼
   gp-query             # src/gp_query.py 실행 래퍼
+  impala-shell         # impala-query --interactive
+  gp-shell             # gp-query --interactive
   s3-ops               # src/s3_ops.py 실행 래퍼
 
 sql/

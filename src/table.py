@@ -1,11 +1,14 @@
-"""조회 결과를 psql 처럼 열을 맞춰 표로 만든다.
+"""조회 결과를 표나 CSV로 내보낸다.
 
-``-o`` 없이 실행했을 때 두 쿼리 도구가 같은 모양으로 보여주도록 여기 모아둔다.
-한글이 섞여도 열이 맞도록 문자 개수가 아니라 표시 폭으로 채운다.
+두 쿼리 도구와 셸이 같은 모양으로 보여주도록 여기 모아둔다. 표는 한글이 섞여도
+열이 맞도록 문자 개수가 아니라 표시 폭으로 채운다.
 """
 
+import contextlib
+import csv
+import gzip
 import sys
-from typing import Any, List, Optional, Sequence, TextIO, Tuple
+from typing import Any, Iterator, List, Optional, Sequence, TextIO, Tuple
 
 from progress import display_width, pad
 
@@ -97,3 +100,43 @@ def print_result(
         )
     else:
         print(f"{len(rows):,}행", file=sys.stderr)
+
+
+@contextlib.contextmanager
+def open_output(path: str, use_gzip: bool, encoding: str) -> Iterator[TextIO]:
+    """CSV 출력 파일을 연다.
+
+    csv 모듈은 자체적으로 개행을 제어하므로 newline='' 로 열어야 한다.
+    그러지 않으면 윈도우에서 빈 줄이 하나씩 끼어든다.
+    """
+    if use_gzip:
+        handle = gzip.open(path, "wt", encoding=encoding, newline="")
+    else:
+        handle = open(path, "w", encoding=encoding, newline="")
+    try:
+        yield handle
+    finally:
+        handle.close()
+
+
+def write_csv(
+    handle: TextIO,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    delimiter: str = "`",
+    null_string: str = "",
+    write_header: bool = True,
+) -> int:
+    """받아둔 결과를 CSV로 쓴다. 기본값은 백틱 구분, 따옴표 없음이다."""
+    writer = csv.writer(
+        handle,
+        delimiter=delimiter,
+        quoting=csv.QUOTE_NONE,
+        quotechar=None,
+        escapechar="\\",
+    )
+    if write_header:
+        writer.writerow(columns)
+    for row in rows:
+        writer.writerow([null_string if v is None else v for v in row])
+    return len(rows)

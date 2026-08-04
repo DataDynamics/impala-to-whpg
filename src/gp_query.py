@@ -37,7 +37,9 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, TextIO
 import appconfig
 import progress
 import sqlfile
+import shell
 import table
+from table import open_output, write_csv
 from progress import PhaseTimer, display_width, pad
 
 #: 설정의 greenplum 섹션에서 읽어 쓰는 키. 나머지 키는 무시한다.
@@ -155,45 +157,6 @@ def build_connect_kwargs(args: argparse.Namespace, password: Optional[str]) -> D
     return kwargs
 
 
-@contextlib.contextmanager
-def open_output(path: str, use_gzip: bool, encoding: str) -> Iterator[TextIO]:
-    """CSV 출력 파일을 연다.
-
-    csv 모듈은 자체적으로 개행을 제어하므로 newline='' 로 열어야 한다.
-    """
-    if use_gzip:
-        handle = gzip.open(path, "wt", encoding=encoding, newline="")
-    else:
-        handle = open(path, "w", encoding=encoding, newline="")
-    try:
-        yield handle
-    finally:
-        handle.close()
-
-
-def write_csv(
-    handle: TextIO,
-    columns: Sequence[str],
-    rows: Sequence[Sequence[Any]],
-    delimiter: str,
-    null_string: str,
-    write_header: bool,
-) -> int:
-    """결과를 CSV로 쓴다. impala-query 와 같은 기본값(백틱 구분, 따옴표 없음)이다."""
-    writer = csv.writer(
-        handle,
-        delimiter=delimiter,
-        quoting=csv.QUOTE_NONE,
-        quotechar=None,
-        escapechar="\\",
-    )
-    if write_header:
-        writer.writerow(columns)
-    for row in rows:
-        writer.writerow([null_string if v is None else v for v in row])
-    return len(rows)
-
-
 def column_names(description: Sequence[Any]) -> List[str]:
     return [d[0] for d in description]
 
@@ -279,9 +242,36 @@ def write_output(
     return 0
 
 
+def make_engine(args: argparse.Namespace, psycopg2: Any, password: Optional[str]) -> "shell.Engine":
+    """대화형 셸이 쓸 엔진 어댑터. 접속 인자는 기존 것을 그대로 재사용한다."""
+
+    def connect() -> Any:
+        return psycopg2.connect(**build_connect_kwargs(args, password))
+
+    def enable_autocommit(conn: Any) -> None:
+        conn.autocommit = True
+        if args.schema:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(f"SET search_path TO {args.schema}")
+                for statement in args.session_sql:
+                    cursor.execute(statement)
+            finally:
+                cursor.close()
+
+    return shell.Engine(
+        name="Greenplum",
+        label=args.database,
+        connect=connect,
+        transactional=True,
+        enable_autocommit=enable_autocommit,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="bin/gp-query",
+        # 셸 래퍼로 들어오면 그 이름을 보여준다
+        prog=os.environ.get("PROG_NAME", "bin/gp-query"),
         description="Greenplum에 SQL을 실행하고 결과를 표나 CSV로 보여줍니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -330,7 +320,8 @@ def build_parser() -> argparse.ArgumentParser:
     conn.add_argument("--sslmode", help="libpq sslmode (require, verify-full 등)")
     conn.add_argument("--timeout", type=int, help="접속 타임아웃(초)")
 
-    sqlfile.add_query_arguments(parser)
+    # 대화형 셸에서는 쿼리를 나중에 받으므로 여기서 강제하지 않는다
+    sqlfile.add_query_arguments(parser, required=False)
 
     session = parser.add_argument_group("세션")
     session.add_argument(
@@ -339,6 +330,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="SQL",
         help="쿼리 전에 실행할 SET 문 등. 여러 번 지정 가능",
+    )
+    session.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="대화형 셸을 엽니다. 이때는 -q/-f 를 주지 않아도 됩니다.",
     )
     session.add_argument(
         "--dry-run",
@@ -371,6 +368,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_shell(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """대화형 셸을 연다. 접속 준비는 일반 실행과 같은 경로를 쓴다."""
+    try:
+        psycopg2 = import_psycopg2()
+    except ImportError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 3
+
+    password = resolve_password(args)
+    print(f"접속: {args.user}@{args.host}:{args.port}/{args.database}", file=sys.stderr)
+    try:
+        return shell.Shell(make_engine(args, psycopg2, password), args).run()
+    except Exception as exc:
+        print(f"\n접속 실패: {exc}", file=sys.stderr)
+        return 4
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     # 인자 없이 실행하면 무엇을 할 수 있는지 보여준다. 오류가 아니므로 0으로 끝낸다.
@@ -384,6 +398,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     apply_config(args, load_greenplum_settings(args), parser, sqlfile.load_sql_settings(args))
     timer = PhaseTimer(PHASES)
     try:
+        if args.interactive:
+            return run_shell(args, parser)
+
+        if not (args.query or args.query_file):
+            parser.error("-q/--query 또는 -f/--query-file 을 주세요. "
+                         "대화형으로 쓰려면 -i/--interactive 입니다.")
 
         sql = sqlfile.read_query(args)
         if args.debug:

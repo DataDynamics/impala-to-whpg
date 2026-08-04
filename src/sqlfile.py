@@ -17,10 +17,16 @@ SQL_SETTINGS = ("dir",)
 SQL_PATH_SETTINGS = ("dir",)
 
 
-def add_query_arguments(parser: argparse.ArgumentParser, group_title: str = "쿼리") -> None:
-    """``--query`` / ``--query-file`` / ``--var`` / ``--sql-dir`` 을 붙인다."""
+def add_query_arguments(
+    parser: argparse.ArgumentParser, group_title: str = "쿼리", required: bool = True
+) -> None:
+    """``--query`` / ``--query-file`` / ``--var`` / ``--sql-dir`` 을 붙인다.
+
+    ``required=False`` 는 대화형 셸처럼 쿼리를 나중에 받는 경우를 위한 것이다.
+    그때는 호출부가 직접 검사해야 한다.
+    """
     query = parser.add_argument_group(group_title)
-    source = query.add_mutually_exclusive_group(required=True)
+    source = query.add_mutually_exclusive_group(required=required)
     source.add_argument("-q", "--query", help="실행할 SQL 문")
     source.add_argument(
         "-f",
@@ -104,7 +110,9 @@ def resolve_query_file(given: str, sql_dir: Optional[str] = None) -> str:
     raise SystemExit(message)
 
 
-def render_query(sql: str, variables: Dict[str, str], source: str) -> str:
+def render_query(
+    sql: str, variables: Dict[str, str], source: str, warn_unused: bool = True
+) -> str:
     """SQL을 Jinja 템플릿으로 보고 변수를 채운다.
 
     정의되지 않은 변수는 **오류** 다. Jinja 기본값은 빈 문자열로 조용히 치환하는
@@ -117,7 +125,9 @@ def render_query(sql: str, variables: Dict[str, str], source: str) -> str:
     if "{{" not in sql and "{%" not in sql:
         # 템플릿 문법이 없으면 Jinja를 부르지 않는다. jinja2 미설치 환경에서도
         # 평범한 .sql 파일은 그대로 돌아간다.
-        if variables:
+        # 셸에서는 \set 해둔 변수가 있어도 평범한 문장을 계속 치는 것이 정상이라
+        # 이 경고를 끈다. 한 번 실행하는 쪽에서는 오타를 잡아주는 신호가 된다.
+        if variables and warn_unused:
             print(
                 f"경고: {source} 에 템플릿 변수가 없어 --var 값이 쓰이지 않았습니다.",
                 file=sys.stderr,

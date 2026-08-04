@@ -597,7 +597,8 @@ def test_script_has_no_unexpected_dependency():
         "appconfig",  # 같은 디렉터리의 설정 로더. PyYAML은 그쪽에서 지연 임포트한다.
         "sqlfile",    # 같은 디렉터리의 쿼리 로더. Jinja2는 그쪽에서 지연 임포트한다.
         "progress",   # 같은 디렉터리의 소요 시간·진행 상황 보고
-        "table",      # 같은 디렉터리의 표 출력
+        "table",      # 같은 디렉터리의 표·CSV 출력
+        "shell",      # 같은 디렉터리의 대화형 셸
     }
     assert modules <= stdlib | third_party, (
         f"허용되지 않은 의존성: {modules - stdlib - third_party}"

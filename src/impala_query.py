@@ -53,7 +53,9 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, TextIO
 import appconfig
 import progress
 import sqlfile
+import shell
 import table
+from table import open_output
 from progress import PhaseTimer, display_width, pad
 from sqlfile import (  # 다른 스크립트와 공유하는 쿼리 읽기
     load_sql_settings,
@@ -342,23 +344,6 @@ def resolve_password(args: argparse.Namespace) -> str:
     )
 
 
-@contextlib.contextmanager
-def open_output(path: str, use_gzip: bool, encoding: str) -> Iterator[TextIO]:
-    """CSV 출력 파일을 연다.
-
-    csv 모듈은 자체적으로 개행을 제어하므로 newline='' 로 열어야 한다.
-    그러지 않으면 윈도우에서 빈 줄이 하나씩 끼어든다.
-    """
-    if use_gzip:
-        handle = gzip.open(path, "wt", encoding=encoding, newline="")
-    else:
-        handle = open(path, "w", encoding=encoding, newline="")
-    try:
-        yield handle
-    finally:
-        handle.close()
-
-
 def make_writer(
     handle: TextIO, delimiter: str, quote: bool, escapechar: Optional[str]
 ) -> Any:
@@ -565,9 +550,31 @@ def apply_config(
         )
 
 
+def make_engine(args: argparse.Namespace, dbapi: Any, password: Optional[str]) -> "shell.Engine":
+    """대화형 셸이 쓸 엔진 어댑터. 접속 인자는 기존 것을 그대로 재사용한다."""
+
+    def connect() -> Any:
+        conn = dbapi.connect(**build_connect_kwargs(args, password))
+        settings = parse_session_settings(args.set)
+        if settings:
+            cursor = conn.cursor()
+            try:
+                for key, value in settings.items():
+                    cursor.execute(f"SET {key}={value}")
+            finally:
+                cursor.close()
+        return conn
+
+    # Impala 에는 트랜잭션이 없다. autocommit 을 켜고 말고 할 것이 없다.
+    return shell.Engine(
+        name="Impala", label=args.database or "impala", connect=connect
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="bin/impala-query",
+        # 셸 래퍼로 들어오면 그 이름을 보여준다
+        prog=os.environ.get("PROG_NAME", "bin/impala-query"),
         description="Impala 쿼리 결과를 CSV로 저장하고 구간별 소요 시간을 표시합니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -642,8 +649,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="HTTP 전송일 때의 경로 (기본 cliservice)",
     )
 
-    sqlfile.add_query_arguments(parser)
+    # 대화형 셸에서는 쿼리를 나중에 받으므로 여기서 강제하지 않는다
+    sqlfile.add_query_arguments(parser, required=False)
     query = parser.add_argument_group("세션")
+    query.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="대화형 셸을 엽니다. 이때는 -q/-f 를 주지 않아도 됩니다.",
+    )
     query.add_argument(
         "--set",
         action="append",
@@ -691,6 +705,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_shell(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """대화형 셸을 연다. 접속 준비는 일반 실행과 같은 경로를 쓴다."""
+    try:
+        dbapi = import_impala_dbapi()
+        check_auth_dependencies(args.auth_mechanism)
+        if args.sasl_backend == "sasl" and args.auth_mechanism != NO_AUTH:
+            use_cyrus_sasl()
+    except ImportError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 3
+
+    password = resolve_password(args) if args.auth_mechanism != NO_AUTH else None
+    who = f"{args.user}@" if args.auth_mechanism != NO_AUTH else ""
+    print(f"접속: {who}{args.host}:{args.port}", file=sys.stderr)
+    try:
+        return shell.Shell(make_engine(args, dbapi, password), args).run()
+    except Exception as exc:
+        print(f"\n접속 실패: {exc}", file=sys.stderr)
+        return 4
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     # 인자 없이 실행하면 무엇을 할 수 있는지 보여준다. 오류가 아니므로 0으로 끝낸다.
@@ -704,6 +739,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     timer = PhaseTimer(PHASES)
     try:
         apply_config(args, load_impala_settings(args), parser, load_sql_settings(args))
+
+        if args.interactive:
+            return run_shell(args, parser)
+
+        if not (args.query or args.query_file):
+            parser.error("-q/--query 또는 -f/--query-file 을 주세요. "
+                         "대화형으로 쓰려면 -i/--interactive 입니다.")
 
         query = read_query(args)
         session_settings = parse_session_settings(args.set)
