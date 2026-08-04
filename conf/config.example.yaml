@@ -35,6 +35,15 @@ impala:
   session_settings:
     MEM_LIMIT: 8g
 
+# bin/query-to-csv 가 --query-file 에 이름만 줬을 때 .sql 을 찾는 곳.
+# 명령행 --sql-dir 로 덮어쓸 수 있다. 적지 않으면 저장소의 sql/ 을 쓴다.
+#
+# 상대 경로는 이 파일이 있는 디렉터리 기준으로 푼다. 작업 디렉터리가 아니므로
+# 어디서 실행해도 같은 곳을 가리킨다. 절대 경로도 그대로 쓸 수 있다.
+sql:
+  dir: ../sql                     # conf/ 기준 → 저장소의 sql/
+  # dir: /srv/etl/queries         # 절대 경로
+
 # bin/s3-ops 가 --config 로 읽는 섹션.
 # 여기 값은 명령행 인자(--bucket, --access-key, --region, --endpoint)로 덮을 수 있다.
 s3:

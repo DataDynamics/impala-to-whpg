@@ -7,6 +7,14 @@
 bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
 ```
 
+다른 디렉터리를 쓰려면 `conf/config.yaml` 의 `sql.dir` 을 바꾸거나 `--sql-dir` 로
+그때만 지정합니다. 설정에 적은 상대 경로는 설정 파일이 있는 `conf/` 기준입니다.
+
+```yaml
+sql:
+  dir: ../sql
+```
+
 ## Jinja 템플릿
 
 `.sql` 파일은 [Jinja](https://jinja.palletsprojects.com/) 템플릿입니다. `{{ 변수 }}`

@@ -141,7 +141,7 @@ sql/
   README.md             # 템플릿 작성법
 
 conf/
-  config.yaml           # 기본으로 읽는 설정 파일
+  config.yaml           # 기본으로 읽는 설정 파일 (sql.dir 로 위 경로를 바꿀 수 있음)
   config.example.yaml   # 모든 옵션을 주석과 함께 나열한 참조 문서
   config.local.yaml     # --config 로 지정해 쓰는 로컬 값 (.gitignore 대상)
   impala-ca.pem         # Impala TLS 검증용 CA 인증서
@@ -311,6 +311,21 @@ bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
 
 이름에 경로 구분자가 없으면 `sql/`에서 찾고, 없는 이름을 주면 거기 있는 파일을
 나열해 줍니다. 다른 위치의 파일은 경로를 그대로 주면 됩니다.
+
+찾을 디렉터리는 바꿀 수 있습니다. `conf/config.yaml`의 `sql.dir`에 적거나
+`--sql-dir`로 그때만 지정합니다.
+
+```yaml
+sql:
+  dir: ../sql            # conf/ 기준 상대 경로. 절대 경로도 됩니다.
+```
+
+```bash
+bin/query-to-csv --sql-dir /srv/etl/queries -f daily_orders.sql -V dt=2026-08-01 -o out.csv
+```
+
+설정의 `sql.dir`은 `ca_cert`와 같이 **설정 파일이 있는 디렉터리 기준**으로 풀리고,
+명령행 `--sql-dir`은 셸에서 친 경로라 작업 디렉터리 기준입니다.
 
 `.sql` 파일은 **Jinja 템플릿**입니다. `{{ 변수 }}` 자리에 `-V`/`--var KEY=VALUE`로 준
 값이 들어가고, 여러 번 지정할 수 있습니다.

@@ -796,7 +796,9 @@ def parsed(tmp_path, body: str, argv: List[str]):
     try:
         parser = q.build_parser()
         args = parser.parse_args(argv + ["-q", "SELECT 1", "-o", "out.csv"])
-        q.apply_config(args, q.load_impala_settings(args), parser)
+        q.apply_config(
+            args, q.load_impala_settings(args), parser, q.load_sql_settings(args)
+        )
         return args
     finally:
         q.appconfig.DEFAULT_CONFIG = original
@@ -992,6 +994,59 @@ def test_unknown_name_lists_available_files(tmp_path, monkeypatch):
         q.resolve_query_file("없는쿼리.sql")
     message = str(exc.value)
     assert "daily.sql" in message and "weekly.sql" in message
+
+
+def test_explicit_sql_dir_is_searched(tmp_path):
+    """설정이나 --sql-dir 로 받은 디렉터리에서 찾는다."""
+    other = tmp_path / "queries"
+    other.mkdir()
+    (other / "daily.sql").write_text("SELECT 1", encoding="utf-8")
+    assert q.resolve_query_file("daily.sql", str(other)) == str(other / "daily.sql")
+
+
+def test_explicit_sql_dir_lists_available_files(tmp_path):
+    other = tmp_path / "queries"
+    other.mkdir()
+    (other / "daily.sql").write_text("SELECT 1", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        q.resolve_query_file("없는쿼리.sql", str(other))
+    assert "daily.sql" in str(exc.value)
+
+
+def test_missing_sql_dir_is_reported(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        q.resolve_query_file("daily.sql", str(tmp_path / "없는디렉터리"))
+    assert "SQL 디렉터리가 없습니다" in str(exc.value)
+
+
+def test_sql_dir_comes_from_config(tmp_path):
+    other = tmp_path / "queries"
+    other.mkdir()
+    args = parsed(tmp_path, f"impala:\n  host: h\n  user: u\nsql:\n  dir: queries\n", [])
+    # 상대 경로는 설정 파일 위치 기준으로 풀린다
+    assert args.sql_dir == str(other)
+
+
+def test_sql_dir_flag_wins_over_config(tmp_path):
+    args = parsed(
+        tmp_path,
+        "impala:\n  host: h\n  user: u\nsql:\n  dir: queries\n",
+        ["--sql-dir", "/tmp/from-flag"],
+    )
+    assert args.sql_dir == "/tmp/from-flag"
+
+
+def test_sql_dir_defaults_to_repo_sql(tmp_path):
+    args = parsed(tmp_path, "impala:\n  host: h\n  user: u\n", [])
+    assert args.sql_dir == str(q.appconfig.SQL_DIR)
+
+
+def test_shipped_config_points_at_the_repo_sql_dir(tmp_path):
+    """저장소에 커밋된 conf/config.yaml 의 sql.dir 이 sql/ 을 가리키는지 확인한다."""
+    parser = q.build_parser()
+    args = parser.parse_args(["-q", "SELECT 1", "-o", "out.csv"])
+    assert q.load_sql_settings(args)["dir"] == str(q.appconfig.SQL_DIR)
 
 
 def test_shipped_sql_templates_render(tmp_path):

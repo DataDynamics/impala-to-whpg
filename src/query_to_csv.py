@@ -359,31 +359,31 @@ def parse_variables(items: Sequence[str]) -> Dict[str, str]:
     return variables
 
 
-def resolve_query_file(given: str) -> str:
+def resolve_query_file(given: str, sql_dir: Optional[str] = None) -> str:
     """``--query-file`` 경로를 푼다.
 
-    파일 이름만 주면 저장소의 ``sql/`` 에서 찾는다. 경로 구분자가 들어 있거나
-    작업 디렉터리에 그 파일이 실제로 있으면 준 그대로 쓴다. 어느 쪽으로도 찾지
-    못하면 ``sql/`` 에 무엇이 있는지 함께 알려준다.
+    파일 이름만 주면 SQL 디렉터리에서 찾는다. 경로 구분자가 들어 있거나 작업
+    디렉터리에 그 파일이 실제로 있으면 준 그대로 쓴다. 어느 쪽으로도 찾지 못하면
+    그 디렉터리에 무엇이 있는지 함께 알려준다.
     """
     if os.path.isfile(given):
         return given
 
-    candidate = appconfig.SQL_DIR / given
-    if os.sep not in given and candidate.is_file():
-        return str(candidate)
+    directory = str(sql_dir) if sql_dir else str(appconfig.SQL_DIR)
+    candidate = os.path.join(directory, given)
+    if os.sep not in given and os.path.isfile(candidate):
+        return candidate
 
-    available = (
-        sorted(p.name for p in appconfig.SQL_DIR.glob("*.sql"))
-        if appconfig.SQL_DIR.is_dir()
-        else []
-    )
     message = f"쿼리 파일을 찾을 수 없습니다: {given}"
+    if not os.path.isdir(directory):
+        raise SystemExit(f"{message}\n  SQL 디렉터리가 없습니다: {directory}")
+
+    available = sorted(n for n in os.listdir(directory) if n.endswith(".sql"))
     if available:
         listing = "\n".join(f"    {name}" for name in available)
-        message += f"\n  {appconfig.SQL_DIR} 에 있는 파일:\n{listing}"
+        message += f"\n  {directory} 에 있는 파일:\n{listing}"
     else:
-        message += f"\n  {appconfig.SQL_DIR} 에 .sql 파일이 없습니다."
+        message += f"\n  {directory} 에 .sql 파일이 없습니다."
     raise SystemExit(message)
 
 
@@ -454,7 +454,7 @@ def read_query(args: argparse.Namespace) -> str:
     """
     variables = parse_variables(args.var)
     if args.query_file:
-        path = resolve_query_file(args.query_file)
+        path = resolve_query_file(args.query_file, getattr(args, "sql_dir", None))
         with open(path, "r", encoding="utf-8-sig") as fp:
             return render_query(fp.read(), variables, path)
     return render_query(args.query, variables, "--query")
@@ -629,6 +629,10 @@ IMPALA_SETTINGS = (
 #: 파일 경로로 다루는 키. 상대 경로는 설정 파일 위치를 기준으로 푼다.
 IMPALA_PATH_SETTINGS = ("ca_cert",)
 
+#: 설정의 sql 섹션에서 읽어 쓰는 키
+SQL_SETTINGS = ("dir",)
+SQL_PATH_SETTINGS = ("dir",)
+
 
 def load_impala_settings(args: argparse.Namespace) -> Dict[str, Any]:
     """설정 파일의 impala 섹션을 읽는다.
@@ -647,8 +651,20 @@ def load_impala_settings(args: argparse.Namespace) -> Dict[str, Any]:
     )
 
 
+def load_sql_settings(args: argparse.Namespace) -> Dict[str, Any]:
+    """설정 파일의 sql 섹션을 읽는다.
+
+    impala 섹션과 달리 없어도 오류가 아니다. 적지 않으면 저장소의 sql/ 을 쓴다.
+    """
+    path = appconfig.resolve_config_path(args)
+    return appconfig.load_section(path, "sql", SQL_SETTINGS, path_keys=SQL_PATH_SETTINGS)
+
+
 def apply_config(
-    args: argparse.Namespace, config: Dict[str, Any], parser: argparse.ArgumentParser
+    args: argparse.Namespace,
+    config: Dict[str, Any],
+    parser: argparse.ArgumentParser,
+    sql_config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """설정 파일 값을 args 에 채운다. 명령행으로 준 값이 항상 우선한다.
 
@@ -667,6 +683,12 @@ def apply_config(
     )
     args.ca_cert = appconfig.pick(args.ca_cert, config["ca_cert"])
     args.timeout = appconfig.pick(args.timeout, config["timeout"])
+
+    # --sql-dir 은 셸에서 친 경로라 작업 디렉터리 기준으로 그대로 쓰고,
+    # 설정의 sql.dir 은 설정 파일 위치 기준으로 이미 풀려서 넘어온다.
+    args.sql_dir = appconfig.pick(
+        args.sql_dir, (sql_config or {}).get("dir"), str(appconfig.SQL_DIR)
+    )
 
     # --no-ssl 은 store_true 라 "주지 않음"과 False 를 구분할 수 없다. 플래그를
     # 주지 않았을 때만 설정의 use_ssl 을 본다.
@@ -768,6 +790,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="쿼리 템플릿에 채울 변수 (예: --var dt=2026-08-01). 여러 번 지정 가능",
     )
     query.add_argument(
+        "--sql-dir",
+        metavar="DIR",
+        help=f"이름만 준 --query-file 을 찾을 디렉터리 (설정의 sql.dir, 기본 {appconfig.SQL_DIR})",
+    )
+    query.add_argument(
         "--set",
         action="append",
         default=[],
@@ -811,8 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = load_impala_settings(args)
-    apply_config(args, config, parser)
+    apply_config(args, load_impala_settings(args), parser, load_sql_settings(args))
     timer = PhaseTimer(PHASES)
 
     query = read_query(args)
