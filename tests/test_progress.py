@@ -196,10 +196,18 @@ def test_report_always_has_a_total():
 def test_print_report_goes_to_stderr(capsys):
     """stdout 은 데이터 몫이라 보고가 섞이면 안 된다."""
     timer = p.PhaseTimer()
+    with timer.measure("무언가"):
+        time.sleep(0.01)
     timer.print_report()
     captured = capsys.readouterr()
     assert "합계" in captured.err
     assert captured.out == ""
+
+
+def test_print_report_is_silent_when_nothing_ran(capsys):
+    """패키지가 없어 아무것도 못 해본 경우 "합계 0.000초" 만 내면 잡음이다."""
+    p.PhaseTimer(("접속", "실행")).print_report()
+    assert capsys.readouterr().err == ""
 
 
 # -- bin/ 스크립트의 크론 대응 -----------------------------------------------------

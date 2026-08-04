@@ -209,7 +209,13 @@ class PhaseTimer:
         return "\n".join(lines)
 
     def print_report(self, stream: TextIO = None) -> None:
-        """작업이 끝난 뒤 항상 부른다. stdout 은 데이터 몫이라 stderr 로 낸다."""
+        """작업이 끝난 뒤 항상 부른다. stdout 은 데이터 몫이라 stderr 로 낸다.
+
+        재어둔 구간이 하나도 없으면 내지 않는다. 패키지가 없거나 인자가 틀려서
+        아무것도 못 해본 경우인데, "합계 0.000초" 만 있는 표는 알려주는 것이 없다.
+        """
+        if not any(seconds > 0 for seconds in self._elapsed.values()):
+            return
         print(self.report(), file=stream or sys.stderr)
 
 

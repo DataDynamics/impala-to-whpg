@@ -756,13 +756,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     args = parser.parse_args(argv)
+    apply_config(args, load_impala_settings(args), parser, load_sql_settings(args))
+
+    # 셸은 구간별 소요 시간을 내지 않는다. 세션 전체를 재봐야 의미가 없고,
+    # 문장별 시간은 셸 안에서 \timing 이 맡는다.
+    if args.interactive:
+        return run_shell(args, parser)
+
     timer = PhaseTimer(PHASES)
     try:
-        apply_config(args, load_impala_settings(args), parser, load_sql_settings(args))
-
-        if args.interactive:
-            return run_shell(args, parser)
-
         if not (args.query or args.query_file):
             parser.error("-q/--query 또는 -f/--query-file 을 주세요. "
                          "대화형으로 쓰려면 -i/--interactive 입니다.")
