@@ -12,5 +12,10 @@ thrift-sasl>=0.4.3
 # s3-ops 에 필요하다.
 boto3>=1.26.0
 
-# s3-ops --config 로 설정 파일을 읽을 때만 필요하다.
+# 설정 파일(conf/config.yaml)을 읽는 데 필요하다.
+# --no-config 로만 쓴다면 없어도 된다.
 PyYAML>=6.0
+
+# sql/ 의 .sql 템플릿에 변수를 채울 때 필요하다.
+# {{ }} 나 {% %} 가 없는 평범한 SQL만 쓴다면 없어도 된다.
+Jinja2>=3.0

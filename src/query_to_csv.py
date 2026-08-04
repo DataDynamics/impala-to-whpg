@@ -14,6 +14,9 @@ TLS(SSL) 위에서 LDAP 인증(auth_mechanism=PLAIN)으로 접속하는 구성�
         --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
         --output orders.csv
 
+    # sql/ 의 템플릿에 변수를 채워 실행
+    bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
+
     # 설정을 무시하고 전부 명령행으로
     export IMPALA_PASSWORD='...'
     bin/query-to-csv --no-config \
@@ -22,9 +25,12 @@ TLS(SSL) 위에서 LDAP 인증(auth_mechanism=PLAIN)으로 접속하는 구성�
         --ca-cert /etc/ssl/certs/impala-ca.pem \
         --query-file daily_orders.sql --output orders.csv.gz --gzip
 
-외부 의존성은 impyla 와 PyYAML 뿐이고, 같은 디렉터리의 appconfig 모듈을 함께
-쓴다. PyYAML 은 설정 파일을 실제로 읽을 때만 임포트하므로 ``--no-config`` 로
-돌린다면 없어도 된다.
+``--query-file`` 은 이름만 주면 저장소의 sql/ 에서 찾는다. .sql 파일은 Jinja
+템플릿이라 ``{{ 변수 }}`` 자리에 ``--var`` 로 준 값이 들어간다.
+
+외부 의존성은 impyla, PyYAML, Jinja2 이고 같은 디렉터리의 appconfig 모듈을 함께
+쓴다. PyYAML 은 설정 파일을 읽을 때만, Jinja2 는 SQL에 템플릿 문법이 있을 때만
+임포트하므로 둘 다 쓰지 않는다면 impyla 만 있어도 된다.
 
 비밀번호는 명령행 인자로 받지 않는다. ps로 다른 사용자에게 노출되기 때문에
 설정 파일(보통 ``${IMPALA_PASSWORD}`` 참조), 환경변수, 대화형 입력으로만 받는다.
@@ -339,21 +345,119 @@ def transport_error_hint(args: argparse.Namespace) -> str:
     return "\n".join(lines)
 
 
+def parse_variables(items: Sequence[str]) -> Dict[str, str]:
+    """``--var KEY=VALUE`` 목록을 딕셔너리로 바꾼다."""
+    variables: Dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            raise SystemExit(f"--var 는 KEY=VALUE 형식이어야 합니다: {item!r}")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise SystemExit(f"--var 의 이름이 비어 있습니다: {item!r}")
+        variables[key] = value
+    return variables
+
+
+def resolve_query_file(given: str) -> str:
+    """``--query-file`` 경로를 푼다.
+
+    파일 이름만 주면 저장소의 ``sql/`` 에서 찾는다. 경로 구분자가 들어 있거나
+    작업 디렉터리에 그 파일이 실제로 있으면 준 그대로 쓴다. 어느 쪽으로도 찾지
+    못하면 ``sql/`` 에 무엇이 있는지 함께 알려준다.
+    """
+    if os.path.isfile(given):
+        return given
+
+    candidate = appconfig.SQL_DIR / given
+    if os.sep not in given and candidate.is_file():
+        return str(candidate)
+
+    available = (
+        sorted(p.name for p in appconfig.SQL_DIR.glob("*.sql"))
+        if appconfig.SQL_DIR.is_dir()
+        else []
+    )
+    message = f"쿼리 파일을 찾을 수 없습니다: {given}"
+    if available:
+        listing = "\n".join(f"    {name}" for name in available)
+        message += f"\n  {appconfig.SQL_DIR} 에 있는 파일:\n{listing}"
+    else:
+        message += f"\n  {appconfig.SQL_DIR} 에 .sql 파일이 없습니다."
+    raise SystemExit(message)
+
+
+def render_query(sql: str, variables: Dict[str, str], source: str) -> str:
+    """SQL을 Jinja 템플릿으로 보고 변수를 채운다.
+
+    정의되지 않은 변수는 **오류** 다. Jinja 기본값은 빈 문자열로 조용히 치환하는
+    것인데, SQL에서는 ``WHERE dt = ''`` 같은 문장이 조용히 만들어져 0건을 돌려주는
+    편이 훨씬 위험하다. 오타를 바로 잡아내는 편이 낫다.
+
+    HTML이 아니므로 자동 이스케이프는 켜지 않는다. 값은 SQL에 그대로 들어가므로,
+    바깥에서 온 값을 넘긴다면 템플릿 쪽에서 따옴표와 검증을 책임져야 한다.
+    """
+    if "{{" not in sql and "{%" not in sql:
+        # 템플릿 문법이 없으면 Jinja를 부르지 않는다. jinja2 미설치 환경에서도
+        # 평범한 .sql 파일은 그대로 돌아간다.
+        if variables:
+            print(
+                f"경고: {source} 에 템플릿 변수가 없어 --var 값이 쓰이지 않았습니다.",
+                file=sys.stderr,
+            )
+        return sql
+
+    try:
+        from jinja2 import StrictUndefined, Template
+        from jinja2 import TemplateError, UndefinedError
+    except ImportError:
+        raise SystemExit(
+            "템플릿 변수를 쓰려면 Jinja2 가 필요합니다.\n"
+            "    pip install Jinja2"
+        )
+
+    class OptionalUndefined(StrictUndefined):
+        """``{% if x %}`` 로 물어보는 것은 되고, ``{{ x }}`` 로 출력하면 오류.
+
+        StrictUndefined 는 참/거짓 판정까지 막아서 선택적 필터를 못 쓴다.
+        여기서는 "값을 SQL에 넣는" 경우만 막으면 된다.
+        """
+
+        def __bool__(self) -> bool:
+            return False
+
+    try:
+        return Template(sql, undefined=OptionalUndefined, keep_trailing_newline=True).render(
+            **variables
+        )
+    except UndefinedError as exc:
+        given = ", ".join(sorted(variables)) or "(없음)"
+        raise SystemExit(
+            f"{source} 의 템플릿 변수를 채우지 못했습니다: {exc}\n"
+            f"  지금 준 변수: {given}\n"
+            "  --var KEY=VALUE 로 지정하세요."
+        )
+    except TemplateError as exc:
+        raise SystemExit(f"{source} 의 템플릿 문법이 잘못되었습니다: {exc}")
+
+
 def read_query(args: argparse.Namespace) -> str:
     """``--query`` 또는 ``--query-file`` 에서 SQL을 읽는다.
 
-    파일 내용은 **그대로** 실행한다. 문장을 쪼개거나 세미콜론을 떼어내지 않는다.
-    여러 줄로 이어진 쿼리도 줄바꿈째 그대로 넘어간다.
+    파일 내용은 템플릿을 채운 뒤 **그대로** 실행한다. 문장을 쪼개거나 세미콜론을
+    떼어내지 않는다. 여러 줄로 이어진 쿼리도 줄바꿈째 그대로 넘어간다.
 
     파일을 읽을 때만 ``utf-8-sig`` 를 쓴다. 이건 SQL을 고치는 게 아니라 인코딩을
     제대로 해석하는 것이다. 윈도우 편집기로 저장한 .sql 앞머리에는 BOM(U+FEFF)이
     붙는데, utf-8로 읽으면 이 문자가 쿼리 첫 글자 앞에 남아 syntax error가 난다.
     utf-8-sig는 BOM이 있으면 벗기고 없으면 utf-8과 똑같이 동작한다.
     """
+    variables = parse_variables(args.var)
     if args.query_file:
-        with open(args.query_file, "r", encoding="utf-8-sig") as fp:
-            return fp.read()
-    return args.query
+        path = resolve_query_file(args.query_file)
+        with open(path, "r", encoding="utf-8-sig") as fp:
+            return render_query(fp.read(), variables, path)
+    return render_query(args.query, variables, "--query")
 
 
 def query_error_hint(query: str, exc: Exception) -> str:
@@ -650,7 +754,19 @@ def build_parser() -> argparse.ArgumentParser:
     query = parser.add_argument_group("쿼리")
     source = query.add_mutually_exclusive_group(required=True)
     source.add_argument("-q", "--query", help="실행할 SELECT 문")
-    source.add_argument("-f", "--query-file", help="SELECT 문이 담긴 파일")
+    source.add_argument(
+        "-f",
+        "--query-file",
+        help=f"SELECT 문이 담긴 .sql 파일. 이름만 주면 {appconfig.SQL_DIR} 에서 찾습니다.",
+    )
+    query.add_argument(
+        "-V",
+        "--var",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="쿼리 템플릿에 채울 변수 (예: --var dt=2026-08-01). 여러 번 지정 가능",
+    )
     query.add_argument(
         "--set",
         action="append",

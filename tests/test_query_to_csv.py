@@ -477,10 +477,12 @@ def test_connect_kwargs_match_impyla_signature():
 MULTILINE = "SELECT\n    order_id,\n    amount\nFROM sales.orders\nWHERE dt = '2026-08-01'"
 
 
-def read_from(tmp_path, text, encoding="utf-8", newline="\n"):
+def read_from(tmp_path, text, encoding="utf-8", newline="\n", var=None):
     path = tmp_path / "daily.sql"
     path.write_bytes(text.replace("\n", newline).encode(encoding))
-    return q.read_query(argparse.Namespace(query=None, query_file=str(path)))
+    return q.read_query(
+        argparse.Namespace(query=None, query_file=str(path), var=var or [])
+    )
 
 
 def test_file_is_executed_as_is(tmp_path):
@@ -516,7 +518,7 @@ def test_bom_and_crlf_together(tmp_path):
 
 
 def test_read_query_from_argument():
-    args = argparse.Namespace(query=MULTILINE + ";", query_file=None)
+    args = argparse.Namespace(query=MULTILINE + ";", query_file=None, var=[])
     assert q.read_query(args) == MULTILINE + ";"
 
 
@@ -595,6 +597,7 @@ def test_script_has_no_unexpected_dependency():
     third_party = {
         "impala",     # 유일한 필수 외부 의존성
         "sasl",       # 선택: --sasl-backend sasl 일 때만 임포트한다
+        "jinja2",     # 선택: SQL에 템플릿 문법이 있을 때만 임포트한다
         "appconfig",  # 같은 디렉터리의 설정 로더. PyYAML은 그쪽에서 지연 임포트한다.
     }
     assert modules <= stdlib | third_party, (
@@ -873,6 +876,134 @@ def test_missing_user_is_reported(tmp_path):
 def test_nosasl_does_not_need_a_user(tmp_path):
     args = parsed(tmp_path, "impala:\n  host: h\n", ["--auth-mechanism", "NOSASL"])
     assert args.user is None
+
+
+# -- SQL 템플릿 -------------------------------------------------------------------
+
+
+def render(tmp_path, sql: str, *vars_: str) -> str:
+    path = tmp_path / "q.sql"
+    path.write_text(sql, encoding="utf-8")
+    return q.read_query(
+        argparse.Namespace(query=None, query_file=str(path), var=list(vars_))
+    )
+
+
+def test_variable_is_substituted(tmp_path):
+    sql = "SELECT * FROM orders WHERE dt = '{{ dt }}'"
+    assert render(tmp_path, sql, "dt=2026-08-01") == (
+        "SELECT * FROM orders WHERE dt = '2026-08-01'"
+    )
+
+
+def test_multiple_variables(tmp_path):
+    sql = "SELECT * FROM {{ tbl }} WHERE dt = '{{ dt }}'"
+    out = render(tmp_path, sql, "tbl=sales.orders", "dt=2026-08-01")
+    assert out == "SELECT * FROM sales.orders WHERE dt = '2026-08-01'"
+
+
+def test_conditional_block(tmp_path):
+    sql = "SELECT 1{% if status %} AND status = '{{ status }}'{% endif %}"
+    assert render(tmp_path, sql, "status=PAID") == "SELECT 1 AND status = 'PAID'"
+    assert render(tmp_path, sql) == "SELECT 1"
+
+
+def test_undefined_variable_is_an_error(tmp_path):
+    """빈 문자열로 조용히 채우면 0건을 돌려주는 쿼리가 만들어진다."""
+    with pytest.raises(SystemExit) as exc:
+        render(tmp_path, "SELECT * FROM orders WHERE dt = '{{ dt }}'")
+    assert "dt" in str(exc.value)
+
+
+def test_optional_variable_is_falsy_but_not_printable(tmp_path):
+    """{% if x %} 로 물어보는 건 되지만 {{ x }} 로 출력하면 오류다."""
+    assert render(tmp_path, "SELECT 1{% if x %} AND x{% endif %}") == "SELECT 1"
+    with pytest.raises(SystemExit):
+        render(tmp_path, "SELECT 1{% if true %} AND x = {{ x }}{% endif %}")
+
+
+def test_default_filter_covers_a_missing_variable(tmp_path):
+    sql = "SELECT * FROM orders WHERE dt = '{{ dt | default(\"2026-01-01\") }}'"
+    assert render(tmp_path, sql) == "SELECT * FROM orders WHERE dt = '2026-01-01'"
+
+
+def test_plain_sql_is_untouched(tmp_path):
+    """템플릿 문법이 없으면 Jinja를 거치지 않고 그대로 넘어간다."""
+    sql = "SELECT a, b FROM t WHERE x = 'a{b}c';\n-- 주석\n"
+    assert render(tmp_path, sql) == sql
+
+
+def test_unused_variables_warn(tmp_path, capsys):
+    render(tmp_path, "SELECT 1", "dt=2026-08-01")
+    assert "쓰이지 않았습니다" in capsys.readouterr().err
+
+
+def test_broken_template_syntax_is_reported(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        render(tmp_path, "SELECT {% if %} 1")
+    assert "템플릿 문법" in str(exc.value)
+
+
+def test_value_may_contain_equals_and_spaces(tmp_path):
+    sql = "SELECT * FROM t WHERE cond = '{{ cond }}'"
+    out = render(tmp_path, sql, "cond=a = b, c")
+    assert out == "SELECT * FROM t WHERE cond = 'a = b, c'"
+
+
+def test_inline_query_is_also_rendered(tmp_path):
+    args = argparse.Namespace(
+        query="SELECT '{{ dt }}'", query_file=None, var=["dt=2026-08-01"]
+    )
+    assert q.read_query(args) == "SELECT '2026-08-01'"
+
+
+@pytest.mark.parametrize("bad", ["dt", "=2026-08-01", " =x"])
+def test_malformed_var_is_rejected(bad):
+    with pytest.raises(SystemExit):
+        q.parse_variables([bad])
+
+
+def test_later_var_wins():
+    assert q.parse_variables(["dt=a", "dt=b"]) == {"dt": "b"}
+
+
+# -- sql/ 디렉터리 ----------------------------------------------------------------
+
+
+def test_bare_name_is_looked_up_in_sql_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(q.appconfig, "SQL_DIR", tmp_path)
+    (tmp_path / "daily.sql").write_text("SELECT 1", encoding="utf-8")
+    assert q.resolve_query_file("daily.sql") == str(tmp_path / "daily.sql")
+
+
+def test_existing_path_is_used_as_given(tmp_path, monkeypatch):
+    monkeypatch.setattr(q.appconfig, "SQL_DIR", tmp_path / "sql")
+    path = tmp_path / "elsewhere.sql"
+    path.write_text("SELECT 1", encoding="utf-8")
+    assert q.resolve_query_file(str(path)) == str(path)
+
+
+def test_unknown_name_lists_available_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(q.appconfig, "SQL_DIR", tmp_path)
+    (tmp_path / "daily.sql").write_text("SELECT 1", encoding="utf-8")
+    (tmp_path / "weekly.sql").write_text("SELECT 1", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        q.resolve_query_file("없는쿼리.sql")
+    message = str(exc.value)
+    assert "daily.sql" in message and "weekly.sql" in message
+
+
+def test_shipped_sql_templates_render(tmp_path):
+    """저장소에 커밋된 .sql 파일이 실제로 렌더링되는지 확인한다."""
+    assert q.appconfig.SQL_DIR.is_dir()
+    templates = sorted(q.appconfig.SQL_DIR.glob("*.sql"))
+    assert templates, "sql/ 에 .sql 파일이 없습니다"
+
+    variables = ["dt=2026-08-01", "from_dt=2026-08-01", "to_dt=2026-08-07"]
+    for path in templates:
+        args = argparse.Namespace(query=None, query_file=str(path), var=variables)
+        assert "{{" not in q.read_query(args)
 
 
 def test_absolute_ca_cert_is_left_alone(tmp_path):

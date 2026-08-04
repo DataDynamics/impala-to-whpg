@@ -22,8 +22,14 @@ from typing import Any, Dict, Optional, Sequence
 #: ``${VAR}`` / ``${VAR:-default}`` 형태의 환경변수 참조
 ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
-#: 저장소 최상위의 conf/config.yaml. src/ 의 부모가 저장소 루트다.
-DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "conf" / "config.yaml"
+#: 저장소 최상위. src/ 의 부모다.
+ROOT = Path(__file__).resolve().parent.parent
+
+#: 기본으로 읽는 설정 파일
+DEFAULT_CONFIG = ROOT / "conf" / "config.yaml"
+
+#: .sql 템플릿을 모아두는 디렉터리
+SQL_DIR = ROOT / "sql"
 
 
 def add_config_arguments(parser: argparse.ArgumentParser) -> None:

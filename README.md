@@ -21,7 +21,7 @@ pip install -r requirements.txt
 
 | 도구 | 필요한 패키지 |
 | --- | --- |
-| `query-to-csv` | `impyla`, `PyYAML` (+ LDAP/Kerberos 인증 시 `pure-sasl`, `thrift-sasl`) |
+| `query-to-csv` | `impyla`, `PyYAML`, `Jinja2` (+ LDAP/Kerberos 인증 시 `pure-sasl`, `thrift-sasl`) |
 | `s3-ops` | `boto3`, `PyYAML` |
 
 `pure-sasl`, `thrift-sasl`은 **LDAP(PLAIN)과 Kerberos(GSSAPI) 인증 모두에 필요합니다.**
@@ -51,10 +51,8 @@ export IMPALA_PASSWORD='...'
 export AWS_ACCESS_KEY_ID='...'
 export AWS_SECRET_ACCESS_KEY='...'
 
-# 접속 정보는 설정에서 오므로 쿼리와 출력 경로만 주면 됩니다
-bin/query-to-csv \
-    --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
-    --output orders.csv
+# 접속 정보는 설정에서, 쿼리는 sql/ 에서 오므로 변수와 출력 경로만 주면 됩니다
+bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 --output orders.csv
 
 # 버킷도 설정에서 옵니다
 bin/s3-ops ls orders/
@@ -137,6 +135,11 @@ bin/
   query-to-csv          # src/query_to_csv.py 실행 래퍼
   s3-ops                # src/s3_ops.py 실행 래퍼
 
+sql/
+  daily_orders.sql      # 하루치 주문 (--var dt)
+  order_range.sql       # 기간별 집계 (--var from_dt, to_dt)
+  README.md             # 템플릿 작성법
+
 conf/
   config.yaml           # 기본으로 읽는 설정 파일
   config.example.yaml   # 모든 옵션을 주석과 함께 나열한 참조 문서
@@ -205,12 +208,12 @@ bin/s3-ops --endpoint http://minio:9000 --bucket dw-stage \
 `src/query_to_csv.py`가 TLS + LDAP 접속으로 조회해 CSV로 저장하고, 어느 구간에
 시간을 썼는지 보여줍니다.
 
-접속 정보는 `conf/config.yaml`의 `impala` 섹션에서 옵니다. `--host`, `-u/--user`,
-`--ca-cert`, `--auth-mechanism` 등으로 개별 값만 덮어쓸 수 있고, `--no-config`를 주면
-설정을 아예 무시하고 명령행 인자만 씁니다.
+접속 정보는 `conf/config.yaml`의 `impala` 섹션에서, 쿼리는 `sql/`의 `.sql` 템플릿에서
+옵니다. `--host`, `-u/--user`, `--ca-cert`, `--auth-mechanism` 등으로 개별 값만 덮어쓸
+수 있고, `--no-config`를 주면 설정을 아예 무시하고 명령행 인자만 씁니다.
 
 ```bash
-pip install impyla pure-sasl thrift-sasl PyYAML
+pip install impyla pure-sasl thrift-sasl PyYAML Jinja2
 export IMPALA_USER='etl_user'
 export IMPALA_PASSWORD='...'
 
@@ -219,6 +222,9 @@ cp /경로/impala-ca.pem conf/impala-ca.pem   # 설정의 impala.ca_cert 가 가
 bin/query-to-csv \
     --query "SELECT * FROM sales.orders WHERE order_dt = '2026-08-01'" \
     --output orders.csv
+
+# sql/ 의 템플릿에 변수를 채워 실행
+bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
 
 # 설정 없이 전부 명령행으로
 bin/query-to-csv --no-config \
@@ -257,8 +263,8 @@ orders.csv  182.4MB  1,240,331행
   `impala.ca_cert`를 비우세요. 그러면 통신은 암호화되지만 서버 인증서는 확인하지
   않습니다.
 - 엑셀에서 한글이 깨지면 `--encoding utf-8-sig`를 쓰세요.
-- 그 밖에 `--gzip`, `--null-string`, `--query-file`, `--set KEY=VALUE`를 지원합니다.
-  자세한 건 `--help`를 보세요.
+- 그 밖에 `--gzip`, `--null-string`, `--query-file`, `--var KEY=VALUE`,
+  `--set KEY=VALUE`를 지원합니다. 자세한 건 `--help`를 보세요.
 
 ### 구분자와 따옴표
 
@@ -295,17 +301,60 @@ bin/query-to-csv ... --delimiter ,
 따옴표를 쓰지 않으면 값 안의 **줄바꿈이 레코드를 깨뜨립니다.** 줄바꿈이 들어갈 수 있는
 컬럼이라면 `--quote`를 켜거나 쿼리에서 `regexp_replace`로 걷어내세요.
 
-### SQL 파일 지정하기
+### SQL 파일과 템플릿 변수
 
-`--query-file`로 여러 줄짜리 쿼리를 담은 `.sql` 파일을 넘길 수 있습니다.
+여러 줄짜리 쿼리는 `sql/` 아래에 `.sql` 파일로 두고 이름만 넘깁니다.
 
 ```bash
-bin/query-to-csv --host ... --user ... \
-    --query-file daily_orders.sql --output orders.csv
+bin/query-to-csv -f daily_orders.sql --var dt=2026-08-01 -o orders.csv
 ```
 
-**파일 내용은 그대로 실행합니다.** 문장을 쪼개거나 세미콜론을 떼어내지 않으므로,
-여러 줄로 이어진 쿼리도 주석도 작성한 그대로 서버에 전달됩니다.
+이름에 경로 구분자가 없으면 `sql/`에서 찾고, 없는 이름을 주면 거기 있는 파일을
+나열해 줍니다. 다른 위치의 파일은 경로를 그대로 주면 됩니다.
+
+`.sql` 파일은 **Jinja 템플릿**입니다. `{{ 변수 }}` 자리에 `-V`/`--var KEY=VALUE`로 준
+값이 들어가고, 여러 번 지정할 수 있습니다.
+
+```sql
+-- sql/daily_orders.sql
+SELECT order_id, customer_id, amount
+  FROM sales.orders
+ WHERE order_dt = '{{ dt }}'
+{%- if status %}
+   AND status = '{{ status }}'
+{%- endif %}
+```
+
+```bash
+bin/query-to-csv -f daily_orders.sql \
+    --var dt=2026-08-01 --var status=PAID -o orders.csv
+```
+
+| 동작 | 설명 |
+| --- | --- |
+| `{{ var }}` | `--var`로 준 값이 들어갑니다. **안 주면 오류입니다.** |
+| `{% if var %}` | 안 주면 거짓으로 보고 그 블록을 건너뜁니다. 선택적 필터에 씁니다. |
+| `{{ var \| default("x") }}` | 안 줬을 때 쓸 기본값을 템플릿에 적습니다. |
+
+`{{ }}`로 참조한 변수를 안 줬을 때 오류로 처리하는 이유는, Jinja 기본 동작인 빈
+문자열 치환이 SQL에서는 `WHERE order_dt = ''` 같은 문장을 조용히 만들어 0건을
+돌려주기 때문입니다. 오타를 그 자리에서 잡는 편이 낫습니다.
+
+```
+sql/daily_orders.sql 의 템플릿 변수를 채우지 못했습니다: 'dt' is undefined
+  지금 준 변수: (없음)
+  --var KEY=VALUE 로 지정하세요.
+```
+
+**따옴표는 템플릿이 책임집니다.** 값은 SQL에 그대로 들어가므로 위 예제처럼
+`'{{ dt }}'`로 따옴표를 템플릿 쪽에 둡니다. 다른 시스템에서 받은 값을 넘긴다면
+넘기기 전에 형식을 검증하세요.
+
+`{{ }}`도 `{% %}`도 없는 파일은 Jinja를 거치지 않고 그대로 나갑니다. 평범한 SQL만
+쓴다면 Jinja2를 설치하지 않아도 됩니다.
+
+**파일 내용은 템플릿을 채운 뒤 그대로 실행합니다.** 문장을 쪼개거나 세미콜론을
+떼어내지 않으므로, 여러 줄로 이어진 쿼리도 주석도 작성한 그대로 서버에 전달됩니다.
 
 파일을 읽을 때 두 가지만 인코딩 차원에서 처리합니다. SQL을 고치는 게 아니라 파일을
 제대로 해석하는 것입니다.
