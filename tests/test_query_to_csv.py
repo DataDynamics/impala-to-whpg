@@ -588,8 +588,6 @@ def test_script_has_no_project_dependency():
         elif isinstance(node, ast.ImportFrom) and node.module:
             modules.add(node.module.split(".")[0])
 
-    assert "impala_to_greenplum" not in modules
-
     stdlib = {
         "argparse", "contextlib", "csv", "getpass", "gzip", "importlib",
         "logging", "os", "sys", "time", "typing", "unicodedata",

@@ -127,10 +127,12 @@ can_access("dw-stage")
 설정 파일의 버킷을 그대로 검사하려면:
 
 ```python
-from impala_to_greenplum import load_config
+import sys
 
-config = load_config("conf/config.yaml")
-can_access(config.s3.bucket)
+sys.path.insert(0, "src")
+from s3_ops import read_s3_settings
+
+can_access(read_s3_settings("conf/config.yaml")["bucket"])
 ```
 
 ## 2. 가장 기본 — 접두사 아래 파일 나열
@@ -327,31 +329,35 @@ def exists(bucket: str, key: str) -> bool:
 ## 8. 이 프로젝트 설정을 그대로 재사용하기
 
 `conf/config.yaml` 에 이미 버킷과 자격증명이 있으니, 목록 확인 스크립트에서도 같은 설정을
-쓰면 됩니다.
+쓰면 됩니다. `src/s3_ops.py` 의 `read_s3_settings` 가 s3 섹션에서 접속에 필요한 값만
+읽어 `${ENV_VAR}` 참조까지 치환해 돌려줍니다.
 
 ```python
-from impala_to_greenplum import load_config
-from impala_to_greenplum.s3_stage import S3Stager
+import sys
 
-config = load_config("conf/config.yaml")
-stager = S3Stager(config.s3)
+import boto3
 
-paginator = stager.client.get_paginator("list_objects_v2")
-prefix = config.s3.prefix.strip("/") + "/"
+sys.path.insert(0, "src")
+from s3_ops import read_s3_settings
 
-for page in paginator.paginate(Bucket=config.s3.bucket, Prefix=prefix):
+settings = read_s3_settings("conf/config.yaml")
+session = boto3.session.Session(
+    aws_access_key_id=settings["access_key_id"],
+    aws_secret_access_key=settings["secret_access_key"],
+    region_name=settings["region"],
+)
+client = session.client("s3", endpoint_url=settings["client_endpoint_url"] or None)
+
+paginator = client.get_paginator("list_objects_v2")
+for page in paginator.paginate(Bucket=settings["bucket"], Prefix="impala/"):
     for obj in page.get("Contents", []):
         print(obj["Key"], f"{obj['Size']:,}")
 ```
 
-`S3Stager.client` 는 설정의 자격증명·리전·`client_endpoint_url`(MinIO 등)을 반영해
-만들어진 boto3 클라이언트라, 별도 설정 없이 바로 쓸 수 있습니다.
-
-바로 실행할 수 있는 스크립트는 `src/s3_ops.py` 에 있습니다. `--config` 를 주면
-설정의 s3 섹션(버킷, 자격증명, 엔드포인트)을 그대로 재사용합니다.
+같은 일을 명령행에서 하려면:
 
 ```bash
-bin/s3-ops --config conf/config.yaml ls s3://dw-stage/impala-to-greenplum/
+bin/s3-ops --config conf/config.yaml ls s3://dw-stage/impala/
 ```
 
 ## S3 호환 스토리지(MinIO 등)

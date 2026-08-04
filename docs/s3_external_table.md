@@ -27,13 +27,7 @@ Greenplum의 `s3` 프로토콜은 **자체 설정 파일** 로 S3에 접근합�
 boto3 자격증명과는 별개이고, 이 파일은 마스터와 모든 세그먼트 호스트의 **동일한
 경로** 에 있어야 합니다.
 
-파일 내용은 아래 헬퍼로 만들 수 있습니다.
-
-```python
-from impala_to_greenplum import render_gp_s3_config
-
-print(render_gp_s3_config("AKIA...", "secret...", section="default"))
-```
+파일은 이런 모양입니다.
 
 ```ini
 [default]

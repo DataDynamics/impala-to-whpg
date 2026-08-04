@@ -1,4 +1,4 @@
-# Impala → Greenplum 적재 설정 예시
+# 설정 예시 — 쓸 수 있는 옵션을 주석과 함께 나열한 참조 문서
 # ${ENV_VAR} 또는 ${ENV_VAR:-기본값} 은 실행 시점에 환경변수로 치환된다.
 
 impala:
@@ -22,80 +22,17 @@ impala:
   session_settings:
     MEM_LIMIT: 8g
 
-greenplum:
-  host: greenplum.example.com
-  port: 5432
-  database: dw
-  user: ${GP_USER:-etl}
-  password: ${GP_PASSWORD}
-  schema: staging
-  # sslmode: require
-  session_sql:
-    # 대량 적재 중 자동 통계 수집을 꺼서 처리량을 높인다
-    - SET gp_autostats_mode = 'none'
-
-# S3 스테이징 설정. load_method가 s3인 작업이 하나라도 있으면 필요하다.
-# Greenplum s3 프로토콜은 세그먼트 호스트에 배포된 설정 파일로 S3에 접근하므로,
-# 아래 gp_config 경로에 파일을 미리 깔아둬야 한다. (docs/s3_external_table.md 참고)
+# bin/s3-ops 가 --config 로 읽는 섹션.
+# 여기 값은 명령행 인자(--bucket, --access-key, --region, --endpoint)로 덮을 수 있다.
 s3:
+  # s3:// 없이 키만 준 경우에 쓰는 기본 버킷
   bucket: dw-stage
-  prefix: impala-to-greenplum
-  endpoint: s3.ap-northeast-2.amazonaws.com
   region: ap-northeast-2
-  gp_config: /home/gpadmin/s3.conf
-  # gp_config_section: prod
 
-  # boto3 업로드 자격증명. 생략하면 환경변수나 IAM 역할을 따른다.
+  # 생략하면 환경변수나 IAM 역할 등 boto3 기본 자격증명 체인을 그대로 쓴다.
   # access_key_id: ${AWS_ACCESS_KEY_ID}
   # secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  # session_token: ${AWS_SESSION_TOKEN}
+
   # MinIO 등 S3 호환 스토리지를 쓸 때만 지정
   # client_endpoint_url: http://minio.example.com:9000
-  # server_side_encryption: AES256
-
-  # 파일 하나당 목표 크기(압축 전). 파일 수가 세그먼트 수 이상이 되도록 잡아야
-  # 모든 세그먼트가 병렬로 읽는다.
-  file_size_mb: 128
-  compress: true
-  max_upload_workers: 4
-  cleanup: true
-  # 형식 오류 행 허용 한도. 0이면 오류 발생 즉시 실패한다.
-  segment_reject_limit: 0
-
-  # PXF를 쓰는 환경이라면 아래처럼 바꾼다
-  # protocol: pxf
-  # pxf_server: s3srv
-
-jobs:
-  # 1) 전체 교체: 매번 TRUNCATE 후 다시 채운다
-  - query: |
-      SELECT
-        order_id,
-        customer_id,
-        order_dt,
-        CAST(amount AS DECIMAL(18,2)) AS amount,
-        status
-      FROM sales.orders
-      WHERE order_dt >= '2026-01-01'
-    target_table: orders
-    mode: truncate
-    batch_size: 50000
-    distributed_by: [order_id]
-    # s3(기본): S3에 올린 뒤 외부 테이블로 세그먼트가 병렬로 읽는다
-    # copy: 마스터를 거쳐 COPY FROM STDIN으로 직접 스트리밍한다
-    load_method: s3
-
-  # 2) 증분 병합: order_id 기준으로 있으면 교체, 없으면 삽입
-  - query: SELECT * FROM sales.orders_delta
-    target_table: orders
-    mode: upsert
-    key_columns: [order_id]
-    batch_size: 100000
-
-  # 3) 원본 테이블 통째로 복제. 소량이면 S3를 거치지 않고 COPY가 간단하다.
-  - source_table: sales.customers
-    target_table: customers
-    load_method: copy
-    mode: replace
-    create_target_if_missing: true
-    distributed_by: [customer_id]
-    analyze_after_load: true

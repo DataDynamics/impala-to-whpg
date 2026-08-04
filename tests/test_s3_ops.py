@@ -235,49 +235,96 @@ def test_connection_options_exist():
         assert expected in options
 
 
-def test_config_values_are_overridden_by_flags(tmp_path, monkeypatch):
+def write_config(tmp_path, body: str) -> str:
+    path = tmp_path / "config.yaml"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+def test_config_values_are_overridden_by_flags(tmp_path, fake_boto3):
     """설정 파일보다 명령행 인자가 우선한다."""
-    captured = {}
-
-    class FakeStager:
-        def __init__(self, config):
-            captured["config"] = config
-
-        @property
-        def client(self):
-            return FakeS3Client()
-
-    import types
-
-    s3_config = types.SimpleNamespace(
-        bucket="from-config",
-        access_key_id="config-key",
-        secret_access_key="config-secret",
-        session_token=None,
-        region="us-east-1",
-        client_endpoint_url=None,
+    path = write_config(
+        tmp_path,
+        "s3:\n"
+        "  bucket: from-config\n"
+        "  access_key_id: config-key\n"
+        "  secret_access_key: config-secret\n"
+        "  region: us-east-1\n",
     )
-    package = types.ModuleType("impala_to_greenplum")
-    package.load_config = lambda path: types.SimpleNamespace(s3=s3_config)
-    stage_module = types.ModuleType("impala_to_greenplum.s3_stage")
-    stage_module.S3Stager = FakeStager
-    monkeypatch.setitem(sys.modules, "impala_to_greenplum", package)
-    monkeypatch.setitem(sys.modules, "impala_to_greenplum.s3_stage", stage_module)
 
     _, bucket = s.make_client(
         args_for(
             "ls",
-            config=str(tmp_path / "config.yaml"),
+            config=path,
             access_key="cli-key",
             endpoint="http://minio:9000",
             bucket="cli-bucket",
         )
     )
 
-    assert captured["config"].access_key_id == "cli-key"          # 덮어씀
-    assert captured["config"].secret_access_key == "config-secret"  # 안 준 값은 유지
-    assert captured["config"].client_endpoint_url == "http://minio:9000"
+    assert fake_boto3["session"]["aws_access_key_id"] == "cli-key"            # 덮어씀
+    assert fake_boto3["session"]["aws_secret_access_key"] == "config-secret"  # 안 준 값은 유지
+    assert fake_boto3["session"]["region_name"] == "us-east-1"
+    assert fake_boto3["client"]["endpoint_url"] == "http://minio:9000"
     assert bucket == "cli-bucket"
+
+
+def test_config_bucket_is_used_when_flag_is_absent(tmp_path, fake_boto3):
+    path = write_config(tmp_path, "s3:\n  bucket: from-config\n")
+
+    _, bucket = s.make_client(args_for("ls", config=path))
+    assert bucket == "from-config"
+
+
+def test_config_ignores_load_only_settings(tmp_path, fake_boto3):
+    """적재 파이프라인 전용 키가 있어도 그대로 읽힌다."""
+    path = write_config(
+        tmp_path,
+        "s3:\n"
+        "  bucket: dw-stage\n"
+        "  prefix: impala-to-greenplum\n"
+        "  file_size_mb: 128\n"
+        "  protocol: pxf\n"
+        "  cleanup: false\n",
+    )
+
+    _, bucket = s.make_client(args_for("ls", config=path))
+    assert bucket == "dw-stage"
+    assert fake_boto3["session"]["aws_access_key_id"] is None  # 기본 자격증명 체인에 맡긴다
+
+
+def test_config_expands_environment_variables(tmp_path, fake_boto3, monkeypatch):
+    monkeypatch.setenv("TEST_S3_KEY", "env-key")
+    path = write_config(
+        tmp_path,
+        "s3:\n"
+        "  bucket: dw-stage\n"
+        "  access_key_id: ${TEST_S3_KEY}\n"
+        "  region: ${TEST_S3_REGION:-ap-northeast-2}\n",
+    )
+
+    s.make_client(args_for("ls", config=path))
+    assert fake_boto3["session"]["aws_access_key_id"] == "env-key"
+    assert fake_boto3["session"]["region_name"] == "ap-northeast-2"  # 기본값
+
+
+def test_config_undefined_environment_variable_fails(tmp_path, fake_boto3, monkeypatch):
+    monkeypatch.delenv("TEST_S3_MISSING", raising=False)
+    path = write_config(
+        tmp_path, "s3:\n  bucket: dw-stage\n  access_key_id: ${TEST_S3_MISSING}\n"
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        s.make_client(args_for("ls", config=path))
+    assert "TEST_S3_MISSING" in str(exc.value)
+
+
+def test_config_without_s3_section_fails(tmp_path, fake_boto3):
+    path = write_config(tmp_path, "impala:\n  host: impala.example.com\n")
+
+    with pytest.raises(SystemExit) as exc:
+        s.make_client(args_for("ls", config=path))
+    assert "s3 섹션" in str(exc.value)
 
 
 # -- 목록 -------------------------------------------------------------------------
