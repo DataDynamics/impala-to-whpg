@@ -21,15 +21,26 @@ class ClientError(Exception):
         self.response = {"Error": {"Code": code}}
 
 
+class TransferConfig:
+    """boto3.s3.transfer.TransferConfig 흉내."""
+
+    def __init__(self, multipart_threshold=None) -> None:
+        self.multipart_threshold = multipart_threshold
+
+
 class FakeS3Client:
     def __init__(self, objects: Dict[str, bytes] = None) -> None:
         self.objects: Dict[str, bytes] = dict(objects or {})
         self.uploaded: List[Any] = []
+        self.put_calls: List[Any] = []
         self.delete_calls: List[List[str]] = []
         self.fail_deleting: set = set()
         self.copied: List[Any] = []
         self.buckets: List[str] = []
         self.locations: Dict[str, Any] = {}
+        # 멀티파트 권한이 없는 계정 흉내. 켜면 전환 크기를 넘는 파일에서
+        # CreateMultipartUpload 이 거부된다.
+        self.deny_multipart = False
 
     # -- 목록 --
     def get_paginator(self, name):
@@ -57,12 +68,22 @@ class FakeS3Client:
         return Paginator()
 
     # -- 쓰기 --
-    def upload_file(self, local, bucket, key, ExtraArgs=None):
+    def upload_file(self, local, bucket, key, ExtraArgs=None, Config=None):
+        threshold = getattr(Config, "multipart_threshold", None)
+        size = Path(local).stat().st_size
+        if self.deny_multipart and size >= (threshold or s.DEFAULT_MULTIPART_THRESHOLD):
+            # boto3 는 ClientError 를 S3UploadFailedError 문자열로 감싸서 올린다
+            raise Exception(
+                f"Failed to upload {local} to {bucket}/{key}: An error occurred "
+                "(AccessDenied) when calling the CreateMultipartUpload operation: "
+                "Forbidden"
+            )
         self.uploaded.append((local, bucket, key, ExtraArgs))
         self.objects[key] = Path(local).read_bytes()
 
-    def put_object(self, Bucket, Key, Body=b""):
-        self.objects[Key] = Body
+    def put_object(self, Bucket, Key, Body=b"", **extra):
+        self.put_calls.append((Key, extra))
+        self.objects[Key] = Body.read() if hasattr(Body, "read") else Body
 
     def copy_object(self, Bucket, Key, CopySource):
         source = CopySource["Key"]
@@ -118,7 +139,7 @@ class FakeS3Client:
 
 @pytest.fixture(autouse=True)
 def patch_client_error(monkeypatch):
-    """cmd_rm 이 임포트하는 botocore 예외를 가짜로 바꾼다."""
+    """cmd_rm 이 임포트하는 botocore 예외와 boto3 TransferConfig 를 가짜로 바꾼다."""
     import types
 
     module = types.ModuleType("botocore.exceptions")
@@ -127,6 +148,16 @@ def patch_client_error(monkeypatch):
     botocore.exceptions = module
     monkeypatch.setitem(sys.modules, "botocore", botocore)
     monkeypatch.setitem(sys.modules, "botocore.exceptions", module)
+
+    transfer = types.ModuleType("boto3.s3.transfer")
+    transfer.TransferConfig = TransferConfig
+    boto3_s3 = types.ModuleType("boto3.s3")
+    boto3_s3.transfer = transfer
+    boto3 = types.ModuleType("boto3")
+    boto3.s3 = boto3_s3
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    monkeypatch.setitem(sys.modules, "boto3.s3", boto3_s3)
+    monkeypatch.setitem(sys.modules, "boto3.s3.transfer", transfer)
 
 
 def args_for(command: str, **overrides) -> argparse.Namespace:
@@ -158,6 +189,8 @@ def args_for(command: str, **overrides) -> argparse.Namespace:
         quiet=False,
         source=None,
         show_region=False,
+        no_multipart=False,
+        multipart_threshold=None,
     )
     options.update(overrides)
     return argparse.Namespace(**options)
@@ -600,6 +633,162 @@ def test_upload_dry_run_uploads_nothing(tmp_path, capsys):
     )
     assert client.objects == {}
     assert "[예행]" in capsys.readouterr().out
+
+
+# -- 멀티파트 -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("512", 512),
+        ("512B", 512),
+        ("8KB", 8 * 1024),
+        ("64MB", 64 * 1024 * 1024),
+        ("1.5GB", int(1.5 * 1024**3)),
+        ("8MiB", 8 * 1024 * 1024),
+        (8388608, 8388608),
+    ],
+)
+def test_parse_size(text, expected):
+    assert s.parse_size(text) == expected
+
+
+def test_parse_size_rejects_garbage():
+    with pytest.raises(SystemExit, match="크기 형식"):
+        s.parse_size("아주 큰 파일")
+
+
+@pytest.mark.parametrize(
+    "message,denied",
+    [
+        ("An error occurred (AccessDenied) when calling the CreateMultipartUpload"
+         " operation: Forbidden", True),
+        ("An error occurred (NotImplemented) when calling the CreateMultipartUpload"
+         " operation", True),
+        # 개시가 아니라 다른 요청이 막힌 것은 그대로 실패시킨다
+        ("An error occurred (AccessDenied) when calling the PutObject operation", False),
+        ("An error occurred (NoSuchBucket) when calling the CreateMultipartUpload"
+         " operation", False),
+    ],
+)
+def test_is_multipart_denied(message, denied):
+    assert s.is_multipart_denied(Exception(message)) is denied
+
+
+def test_upload_falls_back_to_put_object_when_multipart_denied(tmp_path, capsys):
+    local = tmp_path / "big.csv"
+    local.write_bytes(b"x" * 64)
+    client = FakeS3Client()
+    client.deny_multipart = True
+
+    s.cmd_upload(
+        client,
+        args_for(
+            "upload",
+            source=str(local),
+            uri="s3://dw-stage/orders/big.csv",
+            multipart_threshold="1B",  # 작은 파일도 멀티파트로 가게 낮춰 둔다
+        ),
+    )
+    assert client.objects["orders/big.csv"] == b"x" * 64
+    assert client.put_calls == [("orders/big.csv", {})]
+    assert "멀티파트 업로드가 거부되었습니다" in capsys.readouterr().err
+
+
+def test_upload_stops_retrying_multipart_after_first_denial(tmp_path):
+    """한 번 막힌 계정은 나머지 파일도 곧장 PutObject 로 올린다."""
+    (tmp_path / "a.csv").write_bytes(b"1")
+    (tmp_path / "b.csv").write_bytes(b"2")
+    client = FakeS3Client()
+    client.deny_multipart = True
+
+    s.cmd_upload(
+        client,
+        args_for(
+            "upload",
+            source=str(tmp_path),
+            uri="s3://dw-stage/out/",
+            recursive=True,
+            multipart_threshold="1B",
+        ),
+    )
+    assert set(client.objects) == {"out/a.csv", "out/b.csv"}
+    assert client.uploaded == []  # 두 번째 파일은 upload_file 을 아예 부르지 않는다
+
+
+def test_upload_no_multipart_uses_put_object(tmp_path):
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"x")
+    client = FakeS3Client()
+
+    s.cmd_upload(
+        client,
+        args_for("upload", source=str(local), uri="s3://b/k.csv", no_multipart=True),
+    )
+    assert client.objects["k.csv"] == b"x"
+    assert client.uploaded == []
+
+
+def test_upload_no_multipart_keeps_sse(tmp_path):
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"x")
+    client = FakeS3Client()
+
+    s.cmd_upload(
+        client,
+        args_for(
+            "upload",
+            source=str(local),
+            uri="s3://b/k.csv",
+            no_multipart=True,
+            sse="AES256",
+        ),
+    )
+    assert client.put_calls == [("k.csv", {"ServerSideEncryption": "AES256"})]
+
+
+def test_upload_threshold_reaches_transfer_config(tmp_path):
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"x")
+    client = FakeS3Client()
+
+    s.cmd_upload(
+        client,
+        args_for(
+            "upload", source=str(local), uri="s3://b/k.csv", multipart_threshold="64MB"
+        ),
+    )
+    assert client.uploaded[0][1:3] == ("b", "k.csv")
+
+
+def test_upload_refuses_single_put_over_5gb(tmp_path, monkeypatch):
+    local = tmp_path / "huge.csv"
+    local.write_bytes(b"x")
+    monkeypatch.setattr(s.os.path, "getsize", lambda path: s.SINGLE_PUT_LIMIT + 1)
+    client = FakeS3Client()
+
+    with pytest.raises(SystemExit, match="멀티파트 없이는"):
+        s.cmd_upload(
+            client,
+            args_for(
+                "upload", source=str(local), uri="s3://b/huge.csv", no_multipart=True
+            ),
+        )
+    assert client.objects == {}
+
+
+def test_upload_other_errors_are_not_swallowed(tmp_path):
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"x")
+    client = FakeS3Client()
+
+    def boom(*a, **kw):
+        raise Exception("An error occurred (AccessDenied) when calling the PutObject")
+
+    client.upload_file = boom
+    with pytest.raises(Exception, match="PutObject"):
+        s.cmd_upload(client, args_for("upload", source=str(local), uri="s3://b/k.csv"))
 
 
 # -- 디렉터리 생성 -----------------------------------------------------------------

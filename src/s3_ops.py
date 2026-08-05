@@ -16,6 +16,10 @@ S3에는 디렉터리가 없다. 키가 ``a/b/c.csv`` 인 오브젝트가 있을
 
 삭제는 되돌릴 수 없으므로 ``--yes`` 없이는 지울 목록을 보여주고 물어본다.
 
+업로드는 8MB 가 넘으면 boto3 가 알아서 멀티파트로 나눠 올린다. 멀티파트 권한이 없는
+계정에서는 ``CreateMultipartUpload`` 이 거부되는데, 그때는 단일 ``PutObject`` 로 한 번
+더 시도한다. 처음부터 그렇게 하려면 ``--no-multipart`` 를 준다.
+
 버킷과 자격증명은 conf/config.yaml 의 s3 섹션에서 자동으로 읽는다. 명령행으로 준
 값이 항상 우선하고, 둘 다 없으면 환경변수나 IAM 역할을 따른다. 다른 파일을 쓰려면
 ``--config`` 를, 아예 읽지 않으려면 ``--no-config`` 를 준다.
@@ -34,6 +38,12 @@ from progress import PhaseTimer
 #: delete_objects 는 요청당 1000개까지만 받는다
 DELETE_BATCH = 1000
 
+#: boto3 가 멀티파트로 갈아타는 기본 크기
+DEFAULT_MULTIPART_THRESHOLD = 8 * 1024 * 1024
+
+#: PutObject 하나로 올릴 수 있는 최대 크기 (S3 제한). 그 위는 멀티파트뿐이다.
+SINGLE_PUT_LIMIT = 5 * 1024**3
+
 #: 설정의 s3 섹션에서 읽어 쓰는 키. 나머지 키는 무시한다.
 S3_SETTINGS = (
     "bucket",
@@ -42,6 +52,7 @@ S3_SETTINGS = (
     "secret_access_key",
     "session_token",
     "client_endpoint_url",
+    "multipart_threshold",
 )
 
 
@@ -115,6 +126,11 @@ def make_client(args: argparse.Namespace) -> Tuple[Any, Optional[str]]:
     ):
         if given:
             settings[key] = given
+
+    # 멀티파트 전환 크기는 upload 에만 있는 인자다. 명령행으로 주지 않았을 때만
+    # 설정 파일 값을 채워 넣는다.
+    if hasattr(args, "multipart_threshold") and args.multipart_threshold is None:
+        args.multipart_threshold = settings["multipart_threshold"]
 
     import boto3
 
@@ -295,6 +311,126 @@ def iter_upload_pairs(source: str, key: str, recursive: bool) -> List[Tuple[str,
     return [(str(path), key + path.name if key.endswith("/") or not key else key)]
 
 
+#: 멀티파트 개시가 막혔을 때 돌아오는 오류 코드들. S3 호환 스토리지는
+#: 아예 구현하지 않았다는 뜻으로 NotImplemented 를 주기도 한다.
+MULTIPART_DENIED_CODES = (
+    "AccessDenied",
+    "Forbidden",
+    "403",
+    "NotImplemented",
+    "MethodNotAllowed",
+)
+
+
+def parse_size(text: Any) -> int:
+    """``8MB`` / ``512KB`` / ``1.5GB`` 를 바이트로 바꾼다. 단위가 없으면 바이트다."""
+    if isinstance(text, (int, float)):
+        return int(text)
+    value = str(text).strip().upper().replace("IB", "B")
+    factor = 1
+    for suffix, unit in (("KB", 1024), ("MB", 1024**2), ("GB", 1024**3)):
+        if value.endswith(suffix):
+            factor, value = unit, value[: -len(suffix)]
+            break
+    else:
+        value = value[:-1] if value.endswith("B") else value
+    try:
+        return int(float(value.strip()) * factor)
+    except ValueError:
+        raise SystemExit(
+            f"크기 형식이 잘못되었습니다: {text!r}\n"
+            "  512KB, 8MB, 1.5GB 처럼 주세요. 단위를 빼면 바이트입니다."
+        )
+
+
+def transfer_config(threshold: Optional[int]) -> Any:
+    """멀티파트 전환 크기를 바꾼 TransferConfig. 기본값 그대로면 None."""
+    if threshold is None:
+        return None
+    from boto3.s3.transfer import TransferConfig
+
+    return TransferConfig(multipart_threshold=threshold)
+
+
+def is_multipart_denied(exc: BaseException) -> bool:
+    """멀티파트 개시가 권한·미지원으로 막힌 오류인지 본다.
+
+    ``upload_file`` 은 ClientError 를 S3UploadFailedError 문자열로 감싸버려서
+    구조화된 오류 코드가 남지 않는다. 그래서 메시지를 본다.
+    """
+    text = str(exc)
+    if "CreateMultipartUpload" not in text:
+        return False
+    return any(code in text for code in MULTIPART_DENIED_CODES)
+
+
+def ensure_single_put_fits(local: str, size: int) -> None:
+    """단일 PutObject 로 감당되는 크기인지 본다.
+
+    5GB 를 넘으면 멀티파트 말고는 올릴 방법이 없다. 권한을 받아야 한다.
+    """
+    if size <= SINGLE_PUT_LIMIT:
+        return
+    raise SystemExit(
+        f"{local} 은 {human(size)} 라서 멀티파트 없이는 올릴 수 없습니다"
+        f" (PutObject 하나는 {human(SINGLE_PUT_LIMIT)} 까지).\n"
+        "  s3:CreateMultipartUpload, s3:UploadPart, s3:CompleteMultipartUpload,\n"
+        "  s3:AbortMultipartUpload 권한을 받거나 파일을 나눠서 올리세요."
+    )
+
+
+def put_single(
+    client: Any, local: str, bucket: str, key: str, extra: Dict[str, str]
+) -> None:
+    """멀티파트를 쓰지 않고 PutObject 한 번으로 올린다.
+
+    파일 객체를 그대로 넘기므로 내용을 통째로 메모리에 올리지는 않는다.
+    """
+    with open(local, "rb") as body:
+        client.put_object(Bucket=bucket, Key=key, Body=body, **extra)
+
+
+def upload_one(
+    client: Any,
+    local: str,
+    bucket: str,
+    key: str,
+    extra: Dict[str, str],
+    config: Any,
+    single: bool,
+) -> bool:
+    """파일 하나를 올리고, 남은 파일도 단일 PutObject 로 갈지 여부를 돌려준다.
+
+    ``upload_file`` 은 큰 파일을 알아서 멀티파트로 나눠 올린다. 그런데 멀티파트
+    권한이 없는 계정에서는 개시부터 거부당한다. 그때 실패로 끝내지 않고 단일
+    PutObject 로 한 번 더 시도한다. 개시가 막힌 것이므로 올라간 조각은 없다.
+
+    한 번 막힌 계정은 다음 파일도 똑같이 막히니, 이후로는 곧장 PutObject 로 간다.
+    """
+    size = os.path.getsize(local)
+    if single:
+        ensure_single_put_fits(local, size)
+        put_single(client, local, bucket, key, extra)
+        return True
+
+    try:
+        client.upload_file(local, bucket, key, ExtraArgs=extra or None, Config=config)
+    except Exception as exc:  # boto3 는 ClientError 를 S3UploadFailedError 로 감싼다
+        if not is_multipart_denied(exc):
+            raise
+        print(
+            f"멀티파트 업로드가 거부되었습니다: {exc}\n"
+            "  단일 PutObject 로 다시 시도합니다. 계속 이렇게 쓸 거라면"
+            " --no-multipart 를 주거나\n"
+            "  설정의 s3.multipart_threshold 를 올려 두세요.",
+            file=sys.stderr,
+        )
+        ensure_single_put_fits(local, size)
+        put_single(client, local, bucket, key, extra)
+        return True
+    return False
+
+
 def cmd_upload(client: Any, args: argparse.Namespace, bucket: Optional[str] = None) -> int:
     bucket, key = resolve_target(args.uri, bucket)
     pairs = iter_upload_pairs(args.source, key, args.recursive)
@@ -305,6 +441,10 @@ def cmd_upload(client: Any, args: argparse.Namespace, bucket: Optional[str] = No
     extra: Dict[str, str] = {}
     if args.sse:
         extra["ServerSideEncryption"] = args.sse
+
+    threshold = getattr(args, "multipart_threshold", None)
+    config = transfer_config(parse_size(threshold) if threshold is not None else None)
+    single = bool(getattr(args, "no_multipart", False))
 
     total_bytes = 0
     # 파일이 여러 개일 때만 진행 상황을 낸다. 하나뿐이면 결과 줄로 충분하다.
@@ -319,8 +459,7 @@ def cmd_upload(client: Any, args: argparse.Namespace, bucket: Optional[str] = No
         if args.dry_run:
             print(f"[예행] {local} → s3://{bucket}/{target} ({human(size)})")
             continue
-        # upload_file 은 큰 파일을 알아서 멀티파트로 나눠 올린다
-        client.upload_file(local, bucket, target, ExtraArgs=extra or None)
+        single = upload_one(client, local, bucket, target, extra, config, single)
         total_bytes += size
         reporter.update(done)
         print(f"{local} → s3://{bucket}/{target} ({human(size)})")
@@ -749,6 +888,9 @@ def build_parser() -> argparse.ArgumentParser:
             "                      s3://dw-stage/archive/2026-08-01/ --recursive\n"
             "  bin/s3-ops exists   s3://dw-stage/orders/2026-08-01/_DONE\n"
             "\n"
+            "  # 멀티파트 권한이 없어 CreateMultipartUpload 이 거부되는 계정\n"
+            "  bin/s3-ops upload   big.csv.gz s3://dw-stage/orders/ --no-multipart\n"
+            "\n"
             "  # --bucket 을 주면 s3:// 없이 키만 써도 됩니다\n"
             "  bin/s3-ops --bucket dw-stage ls impala/\n"
             "\n"
@@ -820,6 +962,18 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("uri", help="s3://버킷/키 (또는 s3://버킷/접두사/)")
     upload.add_argument("-r", "--recursive", action="store_true", help="디렉터리 전체 업로드")
     upload.add_argument("--sse", help="서버측 암호화 (예: AES256)")
+    upload.add_argument(
+        "--no-multipart",
+        action="store_true",
+        help="멀티파트를 쓰지 않고 PutObject 하나로 올립니다. "
+        "멀티파트 권한이 없는 계정에서 쓰며, 파일당 5GB 까지만 됩니다.",
+    )
+    upload.add_argument(
+        "--multipart-threshold",
+        metavar="크기",
+        help="이 크기부터 멀티파트로 나눠 올립니다 (예: 64MB, 1GB). "
+        f"기본은 boto3 기본값인 {human(DEFAULT_MULTIPART_THRESHOLD)} 입니다.",
+    )
 
     download = sub.add_parser("download", help="파일 또는 접두사 전체 다운로드")
     download.add_argument("uri", help="s3://버킷/키 (또는 s3://버킷/접두사/)")

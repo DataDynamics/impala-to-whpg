@@ -429,3 +429,52 @@ LOCATION이나 `s3.conf` 에 따로 적으며, 두 값이 다를 수 있습니�
 | `TypeError: can't compare offset-naive and offset-aware datetimes` | `LastModified` 는 tz-aware입니다. 비교 대상에 `timezone.utc` 를 붙이세요. |
 | 하위 디렉터리가 안 보인다 | S3에 디렉터리는 없습니다. `Delimiter="/"` 로 `CommonPrefixes` 를 받으세요. |
 | 목록은 되는데 Greenplum이 못 읽는다 | boto3 자격증명과 세그먼트의 `s3.conf` 는 별개입니다. `gpcheckcloud` 로 확인하세요. |
+| 업로드가 `CreateMultipartUpload` 에서 `AccessDenied`/`Forbidden` | 8MB가 넘으면 `upload_file` 이 멀티파트로 나눠 올립니다. 아래 절 참고. |
+
+## 큰 파일 업로드와 멀티파트
+
+`upload_file` 은 8MB(기본값)가 넘는 파일을 멀티파트로 나눠 올립니다. 이때는
+`PutObject` 가 아니라 `CreateMultipartUpload` → `UploadPart` →
+`CompleteMultipartUpload` 순으로 요청이 나갑니다. **`s3:PutObject` 만 열어둔
+정책이나 멀티파트를 막아둔 게이트웨이에서는 첫 요청부터 거부됩니다.**
+
+```
+S3UploadFailedError: Failed to upload orders.csv.gz to dw-stage/orders/orders.csv.gz:
+An error occurred (AccessDenied) when calling the CreateMultipartUpload operation: Forbidden
+```
+
+작은 파일은 잘 올라가는데 큰 파일만 실패한다면 대개 이것입니다. 고르는 길은 셋입니다.
+
+1. 멀티파트 권한을 받는다 — `s3:CreateMultipartUpload`, `s3:UploadPart`,
+   `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload`. 5GB가 넘는 파일은
+   이 방법뿐입니다.
+2. 전환 크기를 올려 파일이 멀티파트로 가지 않게 한다.
+3. `put_object` 로 한 번에 올린다 (파일당 5GB까지).
+
+```python
+from boto3.s3.transfer import TransferConfig
+
+# 2. 64MB 아래는 단일 PutObject 로 올라간다
+s3.upload_file(
+    "orders.csv.gz", "dw-stage", "orders/orders.csv.gz",
+    Config=TransferConfig(multipart_threshold=64 * 1024 * 1024),
+)
+
+# 3. 전송 관리자를 거치지 않고 한 번에. 파일 객체를 넘기므로 통째로
+#    메모리에 올리지는 않는다.
+with open("orders.csv.gz", "rb") as body:
+    s3.put_object(Bucket="dw-stage", Key="orders/orders.csv.gz", Body=body)
+```
+
+`bin/s3-ops upload` 는 이 오류를 만나면 **단일 `PutObject` 로 한 번 더 시도합니다.**
+개시가 막힌 것이라 올라간 조각이 없으므로 다시 올려도 안전하고, 같은 실행에서 남은
+파일은 곧장 `PutObject` 로 갑니다. 처음부터 그렇게 하려면 `--no-multipart` 를,
+전환 크기만 바꾸려면 `--multipart-threshold 64MB` 를 주거나 설정에
+`s3.multipart_threshold` 를 적어 둡니다.
+
+```bash
+bin/s3-ops upload big.csv.gz s3://dw-stage/orders/ --no-multipart
+```
+
+멀티파트가 되는 환경이라면 굳이 끄지 마세요. 나눠 올리면 병렬로 가고, 실패한 조각만
+다시 보냅니다.

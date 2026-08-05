@@ -196,7 +196,7 @@ bin/s3-ops [-b BUCKET] [--access-key KEY] [--secret-key SECRET] [--session-token
 | `head` | `head [-n LINES] [--max-bytes N] [--encoding ENC] [--raw] URI` | 앞부분 보기 (`.gz` 자동 해제) |
 | `exists` | `exists [-q] URI` | 있는지 확인 (종료 코드 `0`/`1`/`5`) |
 | `buckets` | `buckets [--show-region]` | 계정의 버킷 목록 |
-| `upload` | `upload [-r] [--sse SSE] SOURCE URI` | 로컬 → S3 |
+| `upload` | `upload [-r] [--sse SSE] [--no-multipart] [--multipart-threshold 크기] SOURCE URI` | 로컬 → S3 |
 | `download` | `download [-r] [--force] URI DESTINATION` | S3 → 로컬 |
 | `cp` | `cp [-r] SOURCE URI` | S3 안에서 복사 (서버측) |
 | `mv` | `mv [-r] SOURCE URI` | S3 안에서 이동 (복사 후 원본 삭제) |
@@ -712,6 +712,36 @@ bin/s3-ops mv       s3://dw-stage/orders/2026-08-01/ s3://dw-stage/archive/2026-
 bin/s3-ops exists   s3://dw-stage/orders/2026-08-01/_DONE
 bin/s3-ops buckets
 ```
+
+### 큰 파일 올리기 (멀티파트)
+
+8MB가 넘는 파일은 boto3가 알아서 여러 조각으로 나눠 올립니다. 이때는 `PutObject`가
+아니라 `CreateMultipartUpload`부터 나가므로, **`s3:PutObject`만 열어둔 계정에서는
+작은 파일은 되는데 큰 파일만 `AccessDenied`로 실패합니다.**
+
+```
+멀티파트 업로드가 거부되었습니다: ... (AccessDenied) when calling the
+CreateMultipartUpload operation: Forbidden
+  단일 PutObject 로 다시 시도합니다. ...
+```
+
+그때는 단일 `PutObject`로 한 번 더 시도합니다. 개시가 막힌 것이라 올라간 조각이
+없으므로 다시 올려도 안전하고, 같은 실행의 남은 파일은 곧장 `PutObject`로 갑니다.
+처음부터 그렇게 하려면 `--no-multipart`, 전환 크기만 바꾸려면
+`--multipart-threshold`를 주세요. 설정에 `s3.multipart_threshold`로 적어두면 매번
+주지 않아도 됩니다.
+
+```bash
+bin/s3-ops upload big.csv.gz s3://dw-stage/orders/ --no-multipart
+bin/s3-ops upload big.csv.gz s3://dw-stage/orders/ --multipart-threshold 64MB
+```
+
+`PutObject` 하나로는 5GB까지만 올라갑니다. 그보다 큰 파일은 멀티파트 권한
+(`s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`,
+`s3:AbortMultipartUpload`)을 받는 수밖에 없어 그때는 오류로 멈춥니다. 멀티파트가
+되는 환경이라면 굳이 끄지 마세요. 나눠 올리면 병렬로 가고 실패한 조각만 다시
+보냅니다. 자세한 내용은 [boto3로 S3 다루기](docs/boto3.md#큰-파일-업로드와-멀티파트)에
+있습니다.
 
 ### 올린 파일 확인하기
 

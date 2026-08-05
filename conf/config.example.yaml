@@ -76,3 +76,8 @@ s3:
 
   # MinIO 등 S3 호환 스토리지를 쓸 때만 지정
   # client_endpoint_url: http://minio.example.com:9000
+
+  # 업로드가 멀티파트로 갈아타는 크기 (기본 8MB, boto3 기본값).
+  # 멀티파트 권한이 없어 CreateMultipartUpload 이 거부되는 계정이라면 이 값을
+  # 올려 두거나 upload 에 --no-multipart 를 준다. 단일 PutObject 는 5GB 까지다.
+  # multipart_threshold: 64MB
